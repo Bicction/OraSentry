@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Runtime input/output
+output/raw/*
+!output/raw/.gitkeep
+output/report/
+
+# PyInstaller
+build/
+dist/

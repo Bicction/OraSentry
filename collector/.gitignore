@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+
+# Collector runtime data
+output/raw/*
+!output/raw/.gitkeep

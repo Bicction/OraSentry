@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+output/
+*.tar.gz
+*.tar.gz.sha256
