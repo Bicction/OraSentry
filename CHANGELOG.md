@@ -4,8 +4,9 @@
 
 ### 采集与认证
 
-- `check.conf` 新增默认关闭的 `DB_INTERACTIVE_LOGIN`；开启后运行时依次提示 IP、端口、SID、账号、隐藏密码和角色，同时避免密码进入配置、进程参数、调试日志及采集包。
+- `check.conf` 新增默认关闭的 `DB_INTERACTIVE_LOGIN`；开启后运行时依次提示 IP、端口、连接类型、服务名/SID、账号、隐藏密码和角色，同时避免密码进入配置、进程参数、调试日志及采集包。连接类型默认使用与 Easy Connect `主机:端口/服务名` 一致的 `SERVICE_NAME`，并保留显式 SID 连接。
 - 数据库 SQL*Plus 调用统一经过安全连接入口，保留既有 OS 认证和 Oracle Wallet 模式，并支持 11g 的 `SYSDBA`、`SYSOPER` 与普通角色登录。
+- 数据库版本/能力探测失败时直接显示安全筛选后的 ORA/TNS/SP2/LRM 错误，不再要求先开启调试模式才能判断连接失败原因。
 
 ### 评分与报告
 

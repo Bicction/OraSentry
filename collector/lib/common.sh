@@ -118,7 +118,9 @@ prompt_database_login() {
     read -r -p "  IP/主机名: " DB_LOGIN_HOST || prompt_rc=1
     read -r -p "  端口 [1521]: " DB_LOGIN_PORT || prompt_rc=1
     DB_LOGIN_PORT="${DB_LOGIN_PORT:-1521}"
-    read -r -p "  SID: " DB_LOGIN_SID || prompt_rc=1
+    read -r -p "  连接类型 [SERVICE_NAME/SID，默认 SERVICE_NAME]: " DB_LOGIN_CONNECT_TYPE || prompt_rc=1
+    DB_LOGIN_CONNECT_TYPE=$(printf '%s' "${DB_LOGIN_CONNECT_TYPE:-SERVICE_NAME}" | tr '[:lower:]' '[:upper:]')
+    read -r -p "  服务名/SID: " DB_LOGIN_CONNECT_NAME || prompt_rc=1
     read -r -p "  账号: " DB_LOGIN_USER || prompt_rc=1
     read -r -s -p "  密码: " DB_LOGIN_PASSWORD || prompt_rc=1
     printf '\n' >&2
@@ -134,8 +136,15 @@ prompt_database_login() {
         log_error "数据库端口必须是 1-65535 的整数"
         prompt_rc=1
     fi
-    if [[ ! "${DB_LOGIN_SID:-}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
-        log_error "数据库 SID 为空或包含不允许的字符"
+    case "${DB_LOGIN_CONNECT_TYPE:-}" in
+        SERVICE_NAME|SID) ;;
+        *)
+            log_error "数据库连接类型只支持 SERVICE_NAME 或 SID"
+            prompt_rc=1
+            ;;
+    esac
+    if [[ ! "${DB_LOGIN_CONNECT_NAME:-}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+        log_error "数据库服务名/SID 为空或包含不允许的字符"
         prompt_rc=1
     fi
     if [[ ! "${DB_LOGIN_USER:-}" =~ ^[A-Za-z][A-Za-z0-9_$#]*$ ]]; then
@@ -206,7 +215,11 @@ init_env_db() {
     case "${DB_INTERACTIVE_LOGIN:-off}" in
         on)
             prompt_database_login || return 1
-            export ORACLE_SID="${DB_LOGIN_SID}"
+            # SERVICE_NAME 可能是 PDB 服务，不能覆盖用于本地 Alert Log 的
+            # ORACLE_SID。只有环境中没有实例 SID 且明确选择 SID 时才回填。
+            if [[ -z "${ORACLE_SID:-}" && "${DB_LOGIN_CONNECT_TYPE}" == "SID" ]]; then
+                export ORACLE_SID="${DB_LOGIN_CONNECT_NAME}"
+            fi
             ;;
         off) ;;
         *)
@@ -237,9 +250,9 @@ init_env_db() {
     log_info "ORACLE_HOME=${ORACLE_HOME} (来源: $(config_has_key ORACLE_HOME && echo '配置文件' || echo '操作系统'))"
 
     if [[ "${DB_INTERACTIVE_LOGIN:-off}" == "on" ]]; then
-        DB_CONNECT_DESCRIPTOR="(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${DB_LOGIN_HOST})(PORT=${DB_LOGIN_PORT}))(CONNECT_DATA=(SID=${DB_LOGIN_SID})))"
+        DB_CONNECT_DESCRIPTOR="(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${DB_LOGIN_HOST})(PORT=${DB_LOGIN_PORT}))(CONNECT_DATA=(${DB_LOGIN_CONNECT_TYPE}=${DB_LOGIN_CONNECT_NAME})))"
         DB_AUTH_MODE="interactive_password"
-        log_info "数据库连接: 交互式账号认证 (${DB_LOGIN_HOST}:${DB_LOGIN_PORT}/${DB_LOGIN_SID}, 用户=${DB_LOGIN_USER}, 角色=${DB_LOGIN_ROLE})"
+        log_info "数据库连接: 交互式账号认证 (${DB_LOGIN_HOST}:${DB_LOGIN_PORT}, ${DB_LOGIN_CONNECT_TYPE}=${DB_LOGIN_CONNECT_NAME}, 用户=${DB_LOGIN_USER}, 角色=${DB_LOGIN_ROLE})"
     elif [[ -n "${DB_WALLET_ALIAS:-}" ]]; then
         if [[ ! "${DB_WALLET_ALIAS}" =~ ^[A-Za-z0-9_.:-]+$ ]]; then
             log_error "DB_WALLET_ALIAS 包含不允许的字符"
@@ -354,6 +367,12 @@ EOF
     local rc=$?
     if [[ "${rc}" -ne 0 ]] || grep -Eq '^(ORA|SP2|TNS|LRM)-[0-9]+' <<< "${capability_output}"; then
         log_error "数据库版本/能力探测失败 (rc=${rc})"
+        local oracle_error
+        oracle_error=$(printf '%s\n' "${capability_output}" |
+            grep -E '^(ORA|SP2|TNS|LRM)-[0-9]+' | tail -3 | tr '\r\n' '  ')
+        if [[ -n "${oracle_error}" ]]; then
+            log_error "Oracle 返回: ${oracle_error}"
+        fi
         log_debug "${capability_output}"
         return 1
     fi

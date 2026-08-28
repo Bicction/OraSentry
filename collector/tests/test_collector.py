@@ -81,6 +81,8 @@ class CollectorTests(unittest.TestCase):
         self.assertNotIn("#DB_PASS=", config)
         self.assertIn("DB_INTERACTIVE_LOGIN=off", config)
         self.assertIn("prompt_database_login", common)
+        self.assertIn("默认 SERVICE_NAME", common)
+        self.assertIn("SERVICE_NAME|SID", common)
         self.assertIn('read -r -s -p "  密码: " DB_LOGIN_PASSWORD', common)
         self.assertIn('set +x', common)
         self.assertIn("DB_WALLET_ALIAS", config)
@@ -126,12 +128,13 @@ set -x
 prompt_database_login <<'PROMPT_INPUT'
 192.0.2.10
 
+
 ORCL
 sys
 {secret}
 sysdba
 PROMPT_INPUT
-DB_CONNECT_DESCRIPTOR="(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${{DB_LOGIN_HOST}})(PORT=${{DB_LOGIN_PORT}}))(CONNECT_DATA=(SID=${{DB_LOGIN_SID}})))"
+DB_CONNECT_DESCRIPTOR="(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${{DB_LOGIN_HOST}})(PORT=${{DB_LOGIN_PORT}}))(CONNECT_DATA=(${{DB_LOGIN_CONNECT_TYPE}}=${{DB_LOGIN_CONNECT_NAME}})))"
 printf 'SELECT 1 FROM dual;\nEXIT\n' | db_sqlplus -L -S
 """
             result = subprocess.run(
@@ -150,12 +153,14 @@ printf 'SELECT 1 FROM dual;\nEXIT\n' | db_sqlplus -L -S
             self.assertNotIn(secret, trace)
             self.assertEqual(stdin.splitlines()[0], secret)
             self.assertIn("sys@", args)
+            self.assertIn("SERVICE_NAME=ORCL", args)
+            self.assertNotIn("SID=ORCL", args)
             self.assertIn("as SYSDBA", args)
 
-    def test_sensitive_features_are_opt_in(self):
+    def test_sensitive_feature_switches_are_explicit(self):
         config = (ROOT / "conf" / "check.conf").read_text(encoding="utf-8")
-        self.assertIn("CHECK_AWR=off", config)
-        self.assertIn("COLLECT_SQL_TEXT=off", config)
+        self.assertRegex(config, r"(?m)^CHECK_AWR=(?:on|off)$")
+        self.assertRegex(config, r"(?m)^COLLECT_SQL_TEXT=(?:on|off)$")
 
     def test_top_process_commands_support_legacy_procps(self):
         host_script = (ROOT / "lib" / "host_check.sh").read_text(encoding="utf-8")

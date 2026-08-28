@@ -35,9 +35,9 @@ collector/
 DB_INTERACTIVE_LOGIN=on
 ```
 
-再以 oracle 用户运行 `./main_db.sh`。程序会依次提示输入 IP/主机名、端口（默认1521）、SID、账号、密码和角色（默认SYSDBA）。密码输入时不回显，只保存在当前进程内存中，不会写入配置文件、Shell 参数、调试日志、`env.info` 或采集包。
+再以 oracle 用户运行 `./main_db.sh`。程序会依次提示输入 IP/主机名、端口（默认1521）、连接类型（默认 `SERVICE_NAME`）、服务名/SID、账号、密码和角色（默认SYSDBA）。密码输入时不回显，只保存在当前进程内存中，不会写入配置文件、Shell 参数、调试日志、`env.info` 或采集包。
 
-支持 `SYSDBA`、`SYSOPER` 和 `NORMAL` 三种角色。巡检会访问 `GV$INSTANCE`、`DBA_*` 等数据字典；如果选择 `SYSOPER` 或 `NORMAL`，账号必须另外具备全部所需查询权限，否则相应采集项会失败。当前连接使用 SID 描述符，不是 `SERVICE_NAME`。
+`主机:端口/名称` 形式的 Easy Connect 地址中，斜杠后的名称通常是服务名，因此默认选择 `SERVICE_NAME`；只有监听器确实按实例 SID 提供连接时才选择 `SID`。支持 `SYSDBA`、`SYSOPER` 和 `NORMAL` 三种角色。巡检会访问 `GV$INSTANCE`、`DBA_*` 等数据字典；如果选择 `SYSOPER` 或 `NORMAL`，账号必须另外具备全部所需查询权限，否则相应采集项会失败。
 
 交互式 IP 连接只改变数据库会话认证方式。Alert Log 和跟踪文件仍从 collector 所在服务器的本地文件系统读取，因此应在目标数据库服务器上运行；不要在另一台服务器上远程执行完整巡检。
 
