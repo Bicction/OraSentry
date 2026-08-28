@@ -4,7 +4,7 @@
 解析 Shell 采集的主机原始数据，进行阈值判定
 """
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from parser.base import CheckResult, check_threshold, read_file, read_lines, generate_bar_chart, generate_data_table
 from config import HOST_THRESHOLDS
 
@@ -326,36 +326,119 @@ def _parse_vmstat_swap_activity(host_dir: str) -> Tuple[float, float, bool, int]
     return avg_si, avg_so, sustained, len(recent_samples)
 
 
+def _parse_meminfo_values(host_dir: str) -> Dict[str, int]:
+    """读取 /proc/meminfo，返回以 kB 为单位的字段。"""
+    values = {}
+    for line in read_file(f"{host_dir}/meminfo.txt").splitlines():
+        match = re.match(r"^([A-Za-z_()]+):\s+(\d+)", line)
+        if match:
+            values[match.group(1)] = int(match.group(2))
+    return values
+
+
+def _parse_free_values(content: str) -> Tuple[Dict[str, int], Optional[int], Optional[int], int, int]:
+    """兼容解析新旧 procps 的 free -m 输出。"""
+    header = None
+    memory = {}
+    legacy_used = legacy_available = None
+    swap_total = swap_used = 0
+
+    for line in content.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        if parts[0] == "total" and "used" in parts and "free" in parts:
+            header = parts
+            continue
+        if parts[0] == "Mem:":
+            try:
+                numbers = [int(value) for value in parts[1:]]
+            except ValueError:
+                continue
+            if header and len(numbers) >= len(header):
+                memory = dict(zip(header, numbers))
+            continue
+        if line.lstrip().startswith("-/+ buffers/cache:"):
+            try:
+                legacy_used, legacy_available = int(parts[-2]), int(parts[-1])
+            except (ValueError, IndexError):
+                pass
+            continue
+        if parts[0] == "Swap:" and len(parts) >= 3:
+            try:
+                swap_total, swap_used = int(parts[1]), int(parts[2])
+            except ValueError:
+                pass
+
+    return memory, legacy_used, legacy_available, swap_total, swap_used
+
+
 def _parse_memory(host_dir: str) -> List[CheckResult]:
     """解析内存使用"""
     results = []
     content = read_file(f"{host_dir}/memory.txt")
-    if not content:
-        results.append(CheckResult("内存使用率", "CRIT", "数据缺失", "无法获取内存信息"))
+    free_values, legacy_used, legacy_available, swap_total, swap_used = _parse_free_values(content)
+    meminfo = _parse_meminfo_values(host_dir)
+
+    # 优先使用内核提供的 MemAvailable；旧内核按 procps-ng 的兼容口径估算。
+    mem_total = mem_avail = mem_cache = 0
+    calculation_basis = ""
+    total_kb = meminfo.get("MemTotal", 0)
+    if total_kb > 0:
+        if "MemAvailable" in meminfo:
+            available_kb = meminfo["MemAvailable"]
+            calculation_basis = "MemAvailable"
+        else:
+            available_kb = (
+                meminfo.get("MemFree", 0)
+                + meminfo.get("Buffers", 0)
+                + meminfo.get("Cached", 0)
+                + meminfo.get("SReclaimable", 0)
+                - meminfo.get("Shmem", 0)
+            )
+            calculation_basis = "旧内核兼容估算"
+        available_kb = min(total_kb, max(0, available_kb))
+        cache_kb = (
+            meminfo.get("Buffers", 0)
+            + meminfo.get("Cached", 0)
+            + meminfo.get("SReclaimable", 0)
+        )
+        mem_total = total_kb // 1024
+        mem_avail = available_kb // 1024
+        mem_cache = max(0, cache_kb // 1024)
+    elif free_values.get("total", 0) > 0:
+        mem_total = free_values["total"]
+        if "available" in free_values:
+            mem_avail = free_values["available"]
+            calculation_basis = "free available"
+        elif legacy_available is not None:
+            mem_avail = legacy_available
+            calculation_basis = "free -/+ buffers/cache"
+        elif "buffers" in free_values and "cached" in free_values:
+            mem_avail = (
+                free_values.get("free", 0)
+                + free_values["buffers"]
+                + free_values["cached"]
+            )
+            calculation_basis = "旧版 free 兼容估算"
+        else:
+            mem_avail = max(0, mem_total - free_values.get("used", mem_total))
+            calculation_basis = "free used 降级值"
+        mem_avail = min(mem_total, max(0, mem_avail))
+        mem_cache = free_values.get(
+            "buff/cache",
+            free_values.get("buffers", 0) + free_values.get("cached", 0),
+        )
+    else:
+        results.append(CheckResult("内存使用率", "CRIT", "数据异常", "无法解析有效的内存总量和可用内存"))
         return results
 
-    mem_total = mem_used = mem_avail = swap_total = swap_used = 0
-    for line in content.splitlines():
-        if line.startswith("Mem:"):
-            parts = line.split()
-            if len(parts) >= 7:
-                try:
-                    mem_total = int(parts[1])
-                    mem_used = int(parts[2])
-                    mem_avail = int(parts[6])
-                except (ValueError, IndexError):
-                    pass
-        elif line.startswith("Swap:"):
-            parts = line.split()
-            if len(parts) >= 3:
-                try:
-                    swap_total = int(parts[1])
-                    swap_used = int(parts[2])
-                except (ValueError, IndexError):
-                    pass
+    if swap_total <= 0 and meminfo.get("SwapTotal", 0) > 0:
+        swap_total = meminfo["SwapTotal"] // 1024
+        swap_used = max(0, (meminfo["SwapTotal"] - meminfo.get("SwapFree", 0)) // 1024)
 
-    # MemAvailable 比 free 的 used 列更能反映真实内存压力（含可回收缓存）。
-    mem_usage = ((mem_total - mem_avail) / mem_total * 100) if mem_total > 0 else 0
+    mem_used = mem_total - mem_avail
+    mem_usage = (mem_used / mem_total * 100) if mem_total > 0 else 0
     status = check_threshold(mem_usage, HOST_THRESHOLDS["mem_usage_warn"],
                              HOST_THRESHOLDS["mem_usage_crit"])
     suggestion = ""
@@ -364,7 +447,9 @@ def _parse_memory(host_dir: str) -> List[CheckResult]:
 
     results.append(CheckResult(
         "内存使用率", status, f"{mem_usage:.1f}%",
-        f"总内存: {mem_total}MB, 已用: {mem_used}MB, 可用: {mem_avail}MB, Swap已用: {swap_used}MB/{swap_total}MB",
+        f"总内存: {mem_total}MB, 实际占用: {mem_used}MB, 可用: {mem_avail}MB, "
+        f"缓冲/缓存: {mem_cache}MB（可回收部分计入可用）, 计算口径: {calculation_basis}, "
+        f"Swap已用: {swap_used}MB/{swap_total}MB",
         suggestion
     ))
     swap_usage = (swap_used / swap_total * 100) if swap_total > 0 else 0.0

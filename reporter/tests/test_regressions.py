@@ -278,6 +278,80 @@ class RegressionTests(unittest.TestCase):
             self.assertIn("持续换页: 否", result.detail)
             self.assertEqual(result.suggestion, "")
 
+    def test_memory_prefers_memavailable_and_aligns_displayed_used(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._write(
+                td, "memory.txt",
+                "              total        used        free      shared  buff/cache   available\n"
+                "Mem:          64000       10000        5000           0       49000       40000\n"
+                "Swap:         10000        2000        8000\n",
+            )
+            self._write(
+                td, "meminfo.txt",
+                "MemTotal:       65536000 kB\n"
+                "MemFree:         5120000 kB\n"
+                "MemAvailable:   40960000 kB\n"
+                "Buffers:         1024000 kB\n"
+                "Cached:         47104000 kB\n"
+                "SReclaimable:      51200 kB\n"
+                "Shmem:                 0 kB\n",
+            )
+
+            result = next(item for item in _parse_memory(td) if item.name == "内存使用率")
+            self.assertEqual(result.value, "37.5%")
+            self.assertIn("实际占用: 24000MB", result.detail)
+            self.assertIn("可用: 40000MB", result.detail)
+            self.assertIn("计算口径: MemAvailable", result.detail)
+
+    def test_centos6_without_memavailable_uses_legacy_meminfo_estimate(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._write(
+                td, "memory.txt",
+                "             total       used       free     shared    buffers     cached\n"
+                "Mem:          1000        900        100        100         50        300\n"
+                "-/+ buffers/cache:        550        450\n"
+                "Swap:          500        100        400\n",
+            )
+            self._write(
+                td, "meminfo.txt",
+                "MemTotal:       1024000 kB\n"
+                "MemFree:         102400 kB\n"
+                "Buffers:          51200 kB\n"
+                "Cached:          307200 kB\n"
+                "SReclaimable:     51200 kB\n"
+                "Shmem:           102400 kB\n",
+            )
+
+            result = next(item for item in _parse_memory(td) if item.name == "内存使用率")
+            self.assertEqual(result.value, "60.0%")
+            self.assertIn("实际占用: 600MB", result.detail)
+            self.assertIn("可用: 400MB", result.detail)
+            self.assertIn("计算口径: 旧内核兼容估算", result.detail)
+
+    def test_centos6_free_output_falls_back_to_buffers_cache_row(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._write(
+                td, "memory.txt",
+                "             total       used       free     shared    buffers     cached\n"
+                "Mem:          1000        900        100        100         50        300\n"
+                "-/+ buffers/cache:        550        450\n"
+                "Swap:          500        100        400\n",
+            )
+
+            result = next(item for item in _parse_memory(td) if item.name == "内存使用率")
+            self.assertEqual(result.value, "55.0%")
+            self.assertIn("实际占用: 550MB", result.detail)
+            self.assertIn("可用: 450MB", result.detail)
+            self.assertIn("计算口径: free -/+ buffers/cache", result.detail)
+
+    def test_unparseable_memory_is_critical_instead_of_zero_percent_ok(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._write(td, "memory.txt", "unsupported free output\n")
+
+            result = _parse_memory(td)[0]
+            self.assertEqual(result.status, "CRIT")
+            self.assertEqual(result.value, "数据异常")
+
     def test_sustained_swap_activity_warns_below_usage_threshold(self):
         with tempfile.TemporaryDirectory() as td:
             self._write(
