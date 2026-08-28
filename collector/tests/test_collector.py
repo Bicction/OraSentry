@@ -83,7 +83,7 @@ class CollectorTests(unittest.TestCase):
         self.assertIn("prompt_database_login", common)
         self.assertIn("默认 SERVICE_NAME", common)
         self.assertIn("SERVICE_NAME|SID", common)
-        self.assertIn('read -r -s -p "  密码: " DB_LOGIN_PASSWORD', common)
+        self.assertIn('IFS= read -r -s -p "  密码: " DB_LOGIN_PASSWORD', common)
         self.assertIn('set +x', common)
         self.assertIn("DB_WALLET_ALIAS", config)
 
@@ -100,7 +100,8 @@ class CollectorTests(unittest.TestCase):
 
     @unittest.skipUnless(BASH, "bash is not available")
     def test_interactive_password_is_stdin_only_and_hidden_from_xtrace(self):
-        secret = "Fake-P@ss/with spaces!"
+        secret = 'Fake-P@ss/with "spaces"!'
+        quoted_secret = secret.replace('"', '""')
         with tempfile.TemporaryDirectory(dir=ROOT) as td:
             work = Path(td)
             oracle_home = work / "oracle"
@@ -151,11 +152,15 @@ printf 'SELECT 1 FROM dual;\nEXIT\n' | db_sqlplus -L -S
             trace = result.stdout + result.stderr
             self.assertNotIn(secret, args)
             self.assertNotIn(secret, trace)
-            self.assertEqual(stdin.splitlines()[0], secret)
-            self.assertIn("sys@", args)
-            self.assertIn("SERVICE_NAME=ORCL", args)
-            self.assertNotIn("SID=ORCL", args)
-            self.assertIn("as SYSDBA", args)
+            self.assertIn("/nolog", args)
+            self.assertNotIn("sys@", args)
+            self.assertNotIn(secret, stdin.splitlines())
+            self.assertIn(f'CONNECT sys/"{quoted_secret}"@', stdin)
+            self.assertIn("SERVICE_NAME=ORCL", stdin)
+            self.assertNotIn("SID=ORCL", stdin)
+            self.assertIn("AS SYSDBA", stdin)
+            self.assertIn("SET ECHO OFF", stdin)
+            self.assertIn("SET DEFINE OFF", stdin)
 
     def test_sensitive_feature_switches_are_explicit(self):
         config = (ROOT / "conf" / "check.conf").read_text(encoding="utf-8")

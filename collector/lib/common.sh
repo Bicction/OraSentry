@@ -122,7 +122,7 @@ prompt_database_login() {
     DB_LOGIN_CONNECT_TYPE=$(printf '%s' "${DB_LOGIN_CONNECT_TYPE:-SERVICE_NAME}" | tr '[:lower:]' '[:upper:]')
     read -r -p "  服务名/SID: " DB_LOGIN_CONNECT_NAME || prompt_rc=1
     read -r -p "  账号: " DB_LOGIN_USER || prompt_rc=1
-    read -r -s -p "  密码: " DB_LOGIN_PASSWORD || prompt_rc=1
+    IFS= read -r -s -p "  密码: " DB_LOGIN_PASSWORD || prompt_rc=1
     printf '\n' >&2
     read -r -p "  角色 [SYSDBA/SYSOPER/NORMAL，默认 SYSDBA]: " DB_LOGIN_ROLE || prompt_rc=1
     DB_LOGIN_ROLE=$(printf '%s' "${DB_LOGIN_ROLE:-SYSDBA}" | tr '[:lower:]' '[:upper:]')
@@ -169,9 +169,9 @@ prompt_database_login() {
     return "${prompt_rc}"
 }
 
-# 所有 SQL*Plus 调用统一经过此入口。交互认证时，登录参数只包含账号和
-# 连接描述符，密码通过 SQL*Plus 自身的密码提示从标准输入提供，因而不会
-# 出现在 ps 命令行。传递密码期间同样关闭 xtrace。
+# 所有 SQL*Plus 调用统一经过此入口。交互认证先以 /nolog 启动，再从
+# 标准输入执行包含已安全引用密码的 CONNECT；账号、连接描述符、角色和
+# 密码均不会成为进程启动参数。传递认证信息期间同样关闭 xtrace。
 db_sqlplus() {
     local sqlplus_bin="${ORACLE_HOME}/bin/sqlplus"
     if [[ "${DB_AUTH_MODE:-os}" != "interactive_password" ]]; then
@@ -179,17 +179,29 @@ db_sqlplus() {
         return $?
     fi
 
-    local login="${DB_LOGIN_USER}@${DB_CONNECT_DESCRIPTOR}"
-    if [[ "${DB_LOGIN_ROLE}" != "NORMAL" ]]; then
-        login="${login} as ${DB_LOGIN_ROLE}"
-    fi
-
     local restore_xtrace=false
     if [[ "$-" == *x* ]]; then
         restore_xtrace=true
         set +x
     fi
-    { printf '%s\n' "${DB_LOGIN_PASSWORD}"; cat; } | "${sqlplus_bin}" "$@" "${login}"
+
+    # 从此处开始才展开密码，确保 DEBUG=on 的 xtrace 也无法记录其值。
+    # 双引号可保留 @、/、空格等字符；密码本身的双引号按 Oracle 引用
+    # 规则加倍。整个 CONNECT 仅通过 stdin 发送。
+    local quoted_password="${DB_LOGIN_PASSWORD//\"/\"\"}"
+    local connect_target="${DB_LOGIN_USER}/\"${quoted_password}\"@${DB_CONNECT_DESCRIPTOR}"
+    if [[ "${DB_LOGIN_ROLE}" != "NORMAL" ]]; then
+        connect_target="${connect_target} AS ${DB_LOGIN_ROLE}"
+    fi
+
+    {
+        printf '%s\n' "SET ECHO OFF"
+        printf '%s\n' "SET DEFINE OFF"
+        printf '%s\n' "WHENEVER OSERROR EXIT FAILURE"
+        printf '%s\n' "WHENEVER SQLERROR EXIT SQL.SQLCODE"
+        printf 'CONNECT %s\n' "${connect_target}"
+        cat
+    } | "${sqlplus_bin}" "$@" /nolog
     local pipeline_status=("${PIPESTATUS[@]}")
     local sqlplus_rc="${pipeline_status[1]:-1}"
     if [[ "${restore_xtrace}" == true ]]; then
