@@ -6,7 +6,7 @@ Oracle 主机、数据库与安全巡检工具。项目采用离线两段式架�
 
 ## v4.2 重点
 
-- 禁止 `DB_USER/DB_PASS` 明文认证，支持 OS 认证和 Oracle Wallet。
+- 禁止在配置中保存 `DB_USER/DB_PASS` 明文认证，支持 OS 认证、运行时隐藏输入和 Oracle Wallet。
 - 采集协议升级为 `schema_version=4.2`，报告端继续兼容同一主版本的4.x采集包。
 - SQL 文本和 AWR 采集默认关闭，需在 `collector/conf/check.conf` 显式启用。
 - 采集包附带 SHA-256 校验文件，并标记为机密运维数据。

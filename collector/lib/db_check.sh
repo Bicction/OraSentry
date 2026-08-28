@@ -406,7 +406,7 @@ collect_alert_log() {
     local d="$1"
     log_info "[采集] Alert Log"
     local diag_dir
-    diag_dir=$(sqlplus -L -S "${DB_CONNECT}" <<EOF 2>/dev/null
+    diag_dir=$(db_sqlplus -L -S <<EOF 2>/dev/null
 WHENEVER SQLERROR EXIT SQL.SQLCODE
 SET PAGESIZE 0 FEEDBACK OFF HEADING OFF ECHO OFF VERIFY OFF
 SELECT value FROM v\$diag_info WHERE name='Diag Trace';
@@ -548,7 +548,7 @@ collect_trace_files() {
     log_info "[采集] 跟踪文件"
     exec_sql "${d}/trace_dir.txt" "SELECT name, value FROM v\$diag_info WHERE name IN ('Diag Trace', 'Diag Alert', 'Default Trace File');"
 
-    local trace_dir=$(sqlplus -S "${DB_CONNECT}" <<EOF 2>/dev/null
+    local trace_dir=$(db_sqlplus -L -S <<EOF 2>/dev/null
 SET PAGESIZE 0 FEEDBACK OFF HEADING OFF
 SELECT value FROM v\$diag_info WHERE name='Diag Trace';
 EXIT

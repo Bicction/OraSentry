@@ -21,6 +21,7 @@ show_help() {
     echo ""
     echo "示例 (oracle 用户执行):"
     echo "  # ./main_db.sh"
+    echo "  # DB_INTERACTIVE_LOGIN=on 时按提示输入连接信息"
     echo "  # ./main_db.sh -d"
     echo "  # ./main_db.sh --no-pack"
 }

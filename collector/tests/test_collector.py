@@ -1,12 +1,31 @@
 # -*- coding: utf-8 -*-
 """Collector 独立性与 Oracle 兼容性静态回归测试。"""
+import os
 import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def find_bash():
+    discovered = shutil.which("bash")
+    if discovered:
+        return discovered
+    for variable in ("ProgramFiles", "ProgramW6432"):
+        base = os.environ.get(variable)
+        if not base:
+            continue
+        candidate = Path(base, "Git", "bin", "bash.exe")
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+BASH = find_bash()
 
 
 class CollectorTests(unittest.TestCase):
@@ -54,13 +73,84 @@ class CollectorTests(unittest.TestCase):
         self.assertIn('SCHEMA_VERSION="4.2"', common)
         self.assertIn('echo "schema_version=${SCHEMA_VERSION}"', common)
 
-    def test_plaintext_database_password_is_rejected_and_never_debugged(self):
+    def test_database_password_is_prompted_and_never_configured_or_debugged(self):
         common = (ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
         config = (ROOT / "conf" / "check.conf").read_text(encoding="utf-8")
-        self.assertIn("不再支持 DB_USER/DB_PASS", common)
+        self.assertIn("不支持通过 DB_USER/DB_PASS", common)
         self.assertNotIn('log_debug "DB_CONNECT=', common)
         self.assertNotIn("#DB_PASS=", config)
+        self.assertIn("DB_INTERACTIVE_LOGIN=off", config)
+        self.assertIn("prompt_database_login", common)
+        self.assertIn('read -r -s -p "  密码: " DB_LOGIN_PASSWORD', common)
+        self.assertIn('set +x', common)
         self.assertIn("DB_WALLET_ALIAS", config)
+
+    def test_all_database_sqlplus_calls_use_secure_wrapper(self):
+        scripts = [ROOT / "lib" / "common.sh", ROOT / "lib" / "db_check.sh"]
+        combined = "\n".join(path.read_text(encoding="utf-8") for path in scripts)
+        self.assertIn("db_sqlplus()", combined)
+        raw_calls = [
+            line for line in combined.splitlines()
+            if "sqlplus -" in line and "db_sqlplus" not in line
+        ]
+        self.assertEqual(raw_calls, [])
+        self.assertNotIn("${DB_LOGIN_PASSWORD}@", combined)
+
+    @unittest.skipUnless(BASH, "bash is not available")
+    def test_interactive_password_is_stdin_only_and_hidden_from_xtrace(self):
+        secret = "Fake-P@ss/with spaces!"
+        with tempfile.TemporaryDirectory(dir=ROOT) as td:
+            work = Path(td)
+            oracle_home = work / "oracle"
+            bin_dir = oracle_home / "bin"
+            bin_dir.mkdir(parents=True)
+            fake_sqlplus = bin_dir / "sqlplus"
+            fake_sqlplus.write_text(
+                "#!/bin/bash\n"
+                "printf '%s\\n' \"$@\" > \"${FAKE_SQLPLUS_ARGS}\"\n"
+                "cat > \"${FAKE_SQLPLUS_STDIN}\"\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            fake_sqlplus.chmod(0o755)
+
+            relative = work.relative_to(ROOT).as_posix()
+            command = f"""
+export PATH="/usr/bin:/bin:$PATH"
+source lib/common.sh
+ORACLE_HOME='{relative}/oracle'
+DB_AUTH_MODE='interactive_password'
+export FAKE_SQLPLUS_ARGS='{relative}/args.txt'
+export FAKE_SQLPLUS_STDIN='{relative}/stdin.txt'
+set -x
+prompt_database_login <<'PROMPT_INPUT'
+192.0.2.10
+
+ORCL
+sys
+{secret}
+sysdba
+PROMPT_INPUT
+DB_CONNECT_DESCRIPTOR="(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${{DB_LOGIN_HOST}})(PORT=${{DB_LOGIN_PORT}}))(CONNECT_DATA=(SID=${{DB_LOGIN_SID}})))"
+printf 'SELECT 1 FROM dual;\nEXIT\n' | db_sqlplus -L -S
+"""
+            result = subprocess.run(
+                [BASH, "-c", command],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            args = (work / "args.txt").read_text(encoding="utf-8")
+            stdin = (work / "stdin.txt").read_text(encoding="utf-8")
+            trace = result.stdout + result.stderr
+            self.assertNotIn(secret, args)
+            self.assertNotIn(secret, trace)
+            self.assertEqual(stdin.splitlines()[0], secret)
+            self.assertIn("sys@", args)
+            self.assertIn("as SYSDBA", args)
 
     def test_sensitive_features_are_opt_in(self):
         config = (ROOT / "conf" / "check.conf").read_text(encoding="utf-8")
@@ -112,7 +202,7 @@ class CollectorTests(unittest.TestCase):
         self.assertNotIn("background_dump_dest", alert_section)
         self.assertNotIn("legacy_alert_file", alert_section)
 
-    @unittest.skipUnless(shutil.which("bash"), "bash is not available")
+    @unittest.skipUnless(BASH, "bash is not available")
     def test_shell_scripts_pass_bash_syntax_check(self):
         scripts = [
             ROOT / "main.sh",
@@ -121,7 +211,7 @@ class CollectorTests(unittest.TestCase):
             *sorted((ROOT / "lib").glob("*.sh")),
         ]
         subprocess.run(
-            ["bash", "-n", *map(str, scripts)],
+            [BASH, "-n", *map(str, scripts)],
             check=True,
             capture_output=True,
             text=True,

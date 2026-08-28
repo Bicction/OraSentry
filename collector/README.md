@@ -25,7 +25,21 @@ collector/
 
 ## 使用
 
-可按需修改 `conf/check.conf`。默认使用操作系统中的 `ORACLE_SID`、`ORACLE_HOME` 和 `/ as sysdba` 认证。v4.2 禁止 `DB_USER/DB_PASS` 明文认证；如需无密码远程别名，请使用 Oracle Wallet 的 `DB_WALLET_ALIAS`。
+可按需修改 `conf/check.conf`。默认使用操作系统中的 `ORACLE_SID`、`ORACLE_HOME` 和 `/ as sysdba` 认证。禁止通过 `DB_USER/DB_PASS` 在配置或环境变量中保存明文密码；也可以开启运行时交互认证，或使用 Oracle Wallet 的 `DB_WALLET_ALIAS`。
+
+### 运行时交互认证
+
+将 `conf/check.conf` 中的开关改为：
+
+```bash
+DB_INTERACTIVE_LOGIN=on
+```
+
+再以 oracle 用户运行 `./main_db.sh`。程序会依次提示输入 IP/主机名、端口（默认1521）、SID、账号、密码和角色（默认SYSDBA）。密码输入时不回显，只保存在当前进程内存中，不会写入配置文件、Shell 参数、调试日志、`env.info` 或采集包。
+
+支持 `SYSDBA`、`SYSOPER` 和 `NORMAL` 三种角色。巡检会访问 `GV$INSTANCE`、`DBA_*` 等数据字典；如果选择 `SYSOPER` 或 `NORMAL`，账号必须另外具备全部所需查询权限，否则相应采集项会失败。当前连接使用 SID 描述符，不是 `SERVICE_NAME`。
+
+交互式 IP 连接只改变数据库会话认证方式。Alert Log 和跟踪文件仍从 collector 所在服务器的本地文件系统读取，因此应在目标数据库服务器上运行；不要在另一台服务器上远程执行完整巡检。
 
 ```bash
 cd /path/to/collector

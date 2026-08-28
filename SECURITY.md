@@ -11,7 +11,8 @@
 ## 凭据
 
 - 不要在 `check.conf`、Shell 参数或环境日志中保存数据库密码。
-- 优先使用 Oracle OS 认证；跨服务认证使用 Oracle Wallet。
+- 优先使用 Oracle OS 认证；也可使用运行时隐藏输入，跨服务认证建议使用 Oracle Wallet。
+- 交互认证密码只保存在 collector 当前进程内存中，并通过 SQL*Plus 密码提示输入，不进入进程参数和采集文件。
 - `DEBUG=on` 只应用于受控环境，虽然 v4.2 已隐藏连接串，日志仍可能包含敏感路径和 SQL。
 
 ## 可选数据

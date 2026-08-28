@@ -104,6 +104,91 @@ init_env_host() {
     write_env_base "host"
 }
 
+# 交互读取数据库连接信息。DEBUG=on 时必须在整个读取和校验阶段关闭
+# xtrace，避免密码值因条件判断或变量展开进入调试日志。
+prompt_database_login() {
+    local restore_xtrace=false
+    local prompt_rc=0
+    if [[ "$-" == *x* ]]; then
+        restore_xtrace=true
+        set +x
+    fi
+
+    echo "请输入数据库连接信息（密码不会显示）:"
+    read -r -p "  IP/主机名: " DB_LOGIN_HOST || prompt_rc=1
+    read -r -p "  端口 [1521]: " DB_LOGIN_PORT || prompt_rc=1
+    DB_LOGIN_PORT="${DB_LOGIN_PORT:-1521}"
+    read -r -p "  SID: " DB_LOGIN_SID || prompt_rc=1
+    read -r -p "  账号: " DB_LOGIN_USER || prompt_rc=1
+    read -r -s -p "  密码: " DB_LOGIN_PASSWORD || prompt_rc=1
+    printf '\n' >&2
+    read -r -p "  角色 [SYSDBA/SYSOPER/NORMAL，默认 SYSDBA]: " DB_LOGIN_ROLE || prompt_rc=1
+    DB_LOGIN_ROLE=$(printf '%s' "${DB_LOGIN_ROLE:-SYSDBA}" | tr '[:lower:]' '[:upper:]')
+
+    if [[ ! "${DB_LOGIN_HOST:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]]; then
+        log_error "数据库 IP/主机名为空或包含不允许的字符"
+        prompt_rc=1
+    fi
+    if [[ ! "${DB_LOGIN_PORT:-}" =~ ^[0-9]+$ ]] ||
+       [[ "${DB_LOGIN_PORT:-0}" -lt 1 || "${DB_LOGIN_PORT:-0}" -gt 65535 ]]; then
+        log_error "数据库端口必须是 1-65535 的整数"
+        prompt_rc=1
+    fi
+    if [[ ! "${DB_LOGIN_SID:-}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+        log_error "数据库 SID 为空或包含不允许的字符"
+        prompt_rc=1
+    fi
+    if [[ ! "${DB_LOGIN_USER:-}" =~ ^[A-Za-z][A-Za-z0-9_$#]*$ ]]; then
+        log_error "数据库账号为空或不是有效的普通 Oracle 用户名"
+        prompt_rc=1
+    fi
+    if [[ -z "${DB_LOGIN_PASSWORD:-}" ]]; then
+        log_error "数据库密码不能为空"
+        prompt_rc=1
+    fi
+    case "${DB_LOGIN_ROLE:-}" in
+        SYSDBA|SYSOPER|NORMAL) ;;
+        *)
+            log_error "数据库角色只支持 SYSDBA、SYSOPER 或 NORMAL"
+            prompt_rc=1
+            ;;
+    esac
+
+    if [[ "${restore_xtrace}" == true ]]; then
+        set -x
+    fi
+    return "${prompt_rc}"
+}
+
+# 所有 SQL*Plus 调用统一经过此入口。交互认证时，登录参数只包含账号和
+# 连接描述符，密码通过 SQL*Plus 自身的密码提示从标准输入提供，因而不会
+# 出现在 ps 命令行。传递密码期间同样关闭 xtrace。
+db_sqlplus() {
+    local sqlplus_bin="${ORACLE_HOME}/bin/sqlplus"
+    if [[ "${DB_AUTH_MODE:-os}" != "interactive_password" ]]; then
+        "${sqlplus_bin}" "$@" "${DB_CONNECT}"
+        return $?
+    fi
+
+    local login="${DB_LOGIN_USER}@${DB_CONNECT_DESCRIPTOR}"
+    if [[ "${DB_LOGIN_ROLE}" != "NORMAL" ]]; then
+        login="${login} as ${DB_LOGIN_ROLE}"
+    fi
+
+    local restore_xtrace=false
+    if [[ "$-" == *x* ]]; then
+        restore_xtrace=true
+        set +x
+    fi
+    { printf '%s\n' "${DB_LOGIN_PASSWORD}"; cat; } | "${sqlplus_bin}" "$@" "${login}"
+    local pipeline_status=("${PIPESTATUS[@]}")
+    local sqlplus_rc="${pipeline_status[1]:-1}"
+    if [[ "${restore_xtrace}" == true ]]; then
+        set -x
+    fi
+    return "${sqlplus_rc}"
+}
+
 # 初始化数据库采集环境（oracle 用户执行）
 init_env_db() {
     load_config
@@ -111,6 +196,24 @@ init_env_db() {
 
     log_info "=== 数据库巡检采集 (oracle) ==="
     log_info "当前用户: $(whoami)"
+
+    # 不允许从配置或环境变量读取明文密码。交互模式使用不同的内部变量，
+    # 且密码只存在于当前 Shell 进程内存中。
+    if [[ -n "${DB_USER:-}" || -n "${DB_PASS:-}" ]]; then
+        log_error "不支持通过 DB_USER/DB_PASS 保存明文认证；请使用交互认证、OS 认证或 Oracle Wallet"
+        return 1
+    fi
+    case "${DB_INTERACTIVE_LOGIN:-off}" in
+        on)
+            prompt_database_login || return 1
+            export ORACLE_SID="${DB_LOGIN_SID}"
+            ;;
+        off) ;;
+        *)
+            log_error "DB_INTERACTIVE_LOGIN 只能设置为 on 或 off"
+            return 1
+            ;;
+    esac
 
     # ORACLE_SID: 配置文件优先，否则使用操作系统环境变量
     if [[ -z "${ORACLE_SID}" ]]; then
@@ -133,12 +236,11 @@ init_env_db() {
     fi
     log_info "ORACLE_HOME=${ORACLE_HOME} (来源: $(config_has_key ORACLE_HOME && echo '配置文件' || echo '操作系统'))"
 
-    # v4.2 禁止把明文密码放入配置、进程参数或调试日志。
-    if [[ -n "${DB_USER:-}" || -n "${DB_PASS:-}" ]]; then
-        log_error "v4.2 不再支持 DB_USER/DB_PASS 明文认证；请使用 OS 认证或 Oracle Wallet"
-        return 1
-    fi
-    if [[ -n "${DB_WALLET_ALIAS:-}" ]]; then
+    if [[ "${DB_INTERACTIVE_LOGIN:-off}" == "on" ]]; then
+        DB_CONNECT_DESCRIPTOR="(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${DB_LOGIN_HOST})(PORT=${DB_LOGIN_PORT}))(CONNECT_DATA=(SID=${DB_LOGIN_SID})))"
+        DB_AUTH_MODE="interactive_password"
+        log_info "数据库连接: 交互式账号认证 (${DB_LOGIN_HOST}:${DB_LOGIN_PORT}/${DB_LOGIN_SID}, 用户=${DB_LOGIN_USER}, 角色=${DB_LOGIN_ROLE})"
+    elif [[ -n "${DB_WALLET_ALIAS:-}" ]]; then
         if [[ ! "${DB_WALLET_ALIAS}" =~ ^[A-Za-z0-9_.:-]+$ ]]; then
             log_error "DB_WALLET_ALIAS 包含不允许的字符"
             return 1
@@ -228,7 +330,7 @@ record_collection() {
 # DBA_TAB_COLUMNS/DBA_OBJECTS，因此可用于当前支持的 11g 及以上版本。
 init_db_capabilities() {
     local capability_output
-    capability_output=$(sqlplus -L -S "${DB_CONNECT}" <<EOF 2>&1
+    capability_output=$(db_sqlplus -L -S <<EOF 2>&1
 WHENEVER OSERROR EXIT FAILURE
 WHENEVER SQLERROR EXIT SQL.SQLCODE
 SET PAGESIZE 0 FEEDBACK OFF HEADING OFF ECHO OFF VERIFY OFF
@@ -290,7 +392,7 @@ EOF
     export DB_MAJOR_VERSION="${DB_FULL_VERSION%%.*}"
 
     if [[ "${HAS_VDATABASE_CDB}" == "YES" ]]; then
-        DB_IS_CDB=$(sqlplus -L -S "${DB_CONNECT}" <<EOF 2>/dev/null
+        DB_IS_CDB=$(db_sqlplus -L -S <<EOF 2>/dev/null
 WHENEVER SQLERROR EXIT SQL.SQLCODE
 SET PAGESIZE 0 FEEDBACK OFF HEADING OFF ECHO OFF
 SELECT cdb FROM v\$database;
@@ -392,7 +494,7 @@ exec_sql() {
     log_info "执行SQL: ${output_file}"
     log_debug "SQL内容: ${sql}"
     log_debug "数据库认证模式=${DB_AUTH_MODE:-os}（连接串已隐藏）"
-    sqlplus -L -S "${DB_CONNECT}" <<EOF > "${output_file}" 2>&1
+    db_sqlplus -L -S <<EOF > "${output_file}" 2>&1
 WHENEVER OSERROR EXIT FAILURE ROLLBACK
 WHENEVER SQLERROR EXIT SQL.SQLCODE ROLLBACK
 SET LINESIZE 32767
