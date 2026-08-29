@@ -31,7 +31,7 @@ BASH = find_bash()
 class CollectorTests(unittest.TestCase):
     def test_bundle_contains_required_files(self):
         required = (
-            "main.sh",
+            "OraSentry.sh",
             "main_host.sh",
             "main_db.sh",
             "conf/check.conf",
@@ -49,7 +49,7 @@ class CollectorTests(unittest.TestCase):
         self.assertNotIn("PROJECT_DIR", common)
 
     def test_collector_does_not_reference_reporter_code(self):
-        scripts = [ROOT / "main.sh", ROOT / "main_host.sh", ROOT / "main_db.sh"]
+        scripts = [ROOT / "OraSentry.sh", ROOT / "main_host.sh", ROOT / "main_db.sh"]
         combined = "\n".join(path.read_text(encoding="utf-8") for path in scripts)
         self.assertNotIn("report/report_gen.py", combined)
         self.assertNotIn("reporter/report_gen.py", combined)
@@ -67,10 +67,63 @@ class CollectorTests(unittest.TestCase):
         )
         self.assertNotIn("db_check_${CHECK_TIMESTAMP}.tar.gz", main_script)
 
-    def test_v42_schema_and_version_are_recorded(self):
+    def test_host_archive_name_includes_hostname_before_timestamp(self):
+        main_script = (ROOT / "main_host.sh").read_text(encoding="utf-8")
+        self.assertIn(
+            'pack_collection "host_check_${safe_hostname}_${CHECK_TIMESTAMP}.tar.gz"',
+            main_script,
+        )
+        self.assertNotIn('pack_collection "host_check_${CHECK_TIMESTAMP}.tar.gz"', main_script)
+
+    def test_collection_packaging_has_no_checksum_sidecar_logic(self):
         common = (ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
-        self.assertIn('COLLECTOR_VERSION="4.2.0"', common)
-        self.assertIn('SCHEMA_VERSION="4.2"', common)
+        start = common.index("pack_collection()")
+        end = common.index("\nprint_collect_summary()", start)
+        pack_function = common[start:end]
+        self.assertNotIn("sha256sum", pack_function)
+        self.assertNotIn(".sha256", pack_function)
+
+    @unittest.skipUnless(BASH, "bash is not available")
+    def test_collection_packaging_creates_no_checksum_sidecar(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as td:
+            work = Path(td)
+            raw = work / "raw"
+            raw.mkdir()
+            (raw / "env.info").write_text(
+                "schema_version=4.2\ncollection_type=db\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            relative = work.relative_to(ROOT).as_posix()
+            archive_name = "db_check_ORCL_20260829_120000.tar.gz"
+            command = f"""
+source lib/common.sh
+RAW_BASE='{relative}'
+RAW_DIR='{relative}/raw'
+LOG_FILE='{relative}/raw/collect.log'
+NO_PACK=false
+pack_collection '{archive_name}'
+"""
+            result = subprocess.run(
+                [BASH, "-c", command],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue((work / archive_name).is_file())
+            self.assertFalse((work / f"{archive_name}.sha256").exists())
+            self.assertEqual(
+                sorted(path.name for path in work.iterdir()),
+                [archive_name, "raw"],
+            )
+
+    def test_v43_schema_platform_and_version_are_recorded(self):
+        common = (ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
+        self.assertIn('COLLECTOR_VERSION="4.3.0"', common)
+        self.assertIn('SCHEMA_VERSION="4.3"', common)
+        self.assertIn('echo "platform=linux"', common)
         self.assertIn('echo "schema_version=${SCHEMA_VERSION}"', common)
 
     def test_database_password_is_prompted_and_never_configured_or_debugged(self):
@@ -215,7 +268,7 @@ printf 'SELECT 1 FROM dual;\nEXIT\n' | db_sqlplus -L -S
     @unittest.skipUnless(BASH, "bash is not available")
     def test_shell_scripts_pass_bash_syntax_check(self):
         scripts = [
-            ROOT / "main.sh",
+            ROOT / "OraSentry.sh",
             ROOT / "main_host.sh",
             ROOT / "main_db.sh",
             *sorted((ROOT / "lib").glob("*.sh")),

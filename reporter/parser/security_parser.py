@@ -5,7 +5,7 @@
 """
 import re
 from typing import List
-from parser.base import CheckResult, read_file, read_lines, generate_data_table
+from parser.base import CheckResult, read_file, read_lines, generate_data_table, parse_env_info
 from config import SECURITY_THRESHOLDS
 
 
@@ -17,7 +17,12 @@ def parse_security(raw_dir: str) -> List[CheckResult]:
     results.append(_parse_password_policy(sec_dir))
     results.append(_parse_db_security(sec_dir))
     results.extend(_parse_audit_and_access_controls(sec_dir))
-    results.append(_parse_os_security(sec_dir))
+    platform = str(parse_env_info(raw_dir).get("platform", "linux")).strip().lower()
+    if platform == "windows":
+        from parser.windows_security_parser import parse_windows_os_security
+        results.append(parse_windows_os_security(sec_dir))
+    else:
+        results.append(_parse_os_security(sec_dir))
     results.append(_parse_listener_security(sec_dir))
 
     return results

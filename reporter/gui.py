@@ -209,7 +209,7 @@ class CheckMarkBox(tk.Frame):
 class ReportApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Oracle 巡检报告生成器 v4.2")
+        self.root.title("Oracle 巡检报告生成器 v4.3")
         self.root.configure(bg=COLORS["bg"])
 
         self.input_paths = []
@@ -356,7 +356,7 @@ class ReportApp:
             bg=COLORS["navy"], fg="#b8cbe0", font=("Segoe UI", 9),
         ).grid(row=1, column=1, sticky="nw", pady=(2, 12))
         version = tk.Label(
-            header, text="VERSION 4.2", bg=COLORS["navy_light"], fg="#dbeafe",
+            header, text="VERSION 4.3", bg=COLORS["navy_light"], fg="#dbeafe",
             font=("Segoe UI", 8, "bold"), padx=12, pady=6,
         )
         version.grid(row=0, column=2, rowspan=2, padx=16)

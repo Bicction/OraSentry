@@ -40,7 +40,7 @@ from scoring import (
 )
 
 
-APP_VERSION = "4.2.0"
+APP_VERSION = "4.3.0"
 SUPPORTED_SCHEMA_MAJOR = 4
 
 
@@ -891,7 +891,7 @@ def resolve_output_file(env_info: dict, output_file: str = None,
 
 
 def _clean_report_sidecars(output_file: str) -> None:
-    """兼容旧调用；v4.2 继续确保不删除报告生成器未创建的旁路文件。"""
+    """兼容旧调用；v4.3 继续确保不删除报告生成器未创建的旁路文件。"""
     return None
 
 

@@ -8,7 +8,7 @@ COLLECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${COLLECT_DIR}/lib/common.sh"
 
 show_help() {
-    echo "数据库巡检采集工具 v4.2"
+    echo "数据库巡检采集工具 v4.3"
     echo ""
     echo "用法: $0 [选项]"
     echo ""
@@ -55,7 +55,7 @@ main() {
     fi
 
     echo "============================================"
-    echo "  数据库巡检数据采集 v4.2"
+    echo "  数据库巡检数据采集 v4.3"
     echo "============================================"
     echo ""
 

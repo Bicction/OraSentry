@@ -1,12 +1,12 @@
-# Oracle 巡检数据收集端 v4.2
+# OraSentry Linux 巡检数据收集端 v4.3
 
 该目录是可独立上传到 Oracle Linux 服务器的收集程序，不依赖报告端或 Python。
 
 ## 目录
 
 ```text
-collector/
-├── main.sh                 # 按当前用户自动分发
+collector-linux/
+├── OraSentry.sh            # 按当前用户自动分发
 ├── main_host.sh            # root：主机巡检
 ├── main_db.sh              # oracle：数据库与安全巡检
 ├── conf/check.conf         # 收集配置
@@ -42,40 +42,40 @@ DB_INTERACTIVE_LOGIN=on
 交互式 IP 连接只改变数据库会话认证方式。Alert Log 和跟踪文件仍从 collector 所在服务器的本地文件系统读取，因此应在目标数据库服务器上运行；不要在另一台服务器上远程执行完整巡检。
 
 ```bash
-cd /path/to/collector
+cd /path/to/collector-linux
 
 # root 用户收集主机数据
 ./main_host.sh
 
 # oracle 用户收集数据库和安全数据
-su - oracle -c "cd /path/to/collector && ./main_db.sh"
+su - oracle -c "cd /path/to/collector-linux && ./main_db.sh"
 ```
 
 也可以让统一入口按当前用户自动选择：
 
 ```bash
-./main.sh
-./main.sh --host
-./main.sh --db
+./OraSentry.sh
+./OraSentry.sh --host
+./OraSentry.sh --db
 ```
 
 默认输出：
 
 ```text
-output/raw/host_check_<timestamp>.tar.gz
+output/raw/host_check_<hostname>_<timestamp>.tar.gz
 output/raw/db_check_<SID>_<timestamp>.tar.gz
 ```
 
-每个压缩包旁会生成同名 `.sha256` 校验文件。采集包属于机密运维数据，应通过受控通道传输并按组织策略设置保留期。
+打包阶段只生成上述 tar.gz 采集包。采集包属于机密运维数据，应通过受控通道传输并按组织策略设置保留期。
 
 将上述压缩包拷贝到 Windows 的 `reporter` 目录，通过 `OracleReport.exe` 或 Python 生成报告。收集端不需要、也不会调用报告端代码。
 
 ## 配置与输出
 
-- `RAW_DATA_DIR` 相对于 `collector` 根目录；也可以填写绝对路径。
+- `RAW_DATA_DIR` 相对于 `collector-linux` 根目录；也可以填写绝对路径。
 - root 首次创建共享输出目录时，会为 oracle 用户设置可写的组权限。
 - 每次收集都会生成 `env.info`、`collection_manifest.tsv` 和 `collect.log`。
-- `env.info` 包含 `schema_version=4.2`、采集器版本和数据分类。
+- `env.info` 包含 `schema_version=4.3`、`platform=linux`、采集器版本和数据分类。
 - 单项失败会记录到清单并使主程序返回非零退出码，但仍保留并打包已收集的数据。
 - `CHECK_AWR` 和 `COLLECT_SQL_TEXT` 默认关闭；启用前需确认授权和数据处理要求。
 - 实例状态通过 `GV$INSTANCE` 采集全部实例；Alert Log 仍只读取当前 `ORACLE_SID` 对应物理日志的最后 100000 行，并在其中提取最近30天内容及实际首末时间。
@@ -83,6 +83,6 @@ output/raw/db_check_<SID>_<timestamp>.tar.gz
 ## 验证
 
 ```bash
-bash -n main.sh main_host.sh main_db.sh lib/*.sh
+bash -n OraSentry.sh main_host.sh main_db.sh lib/*.sh
 python3 -m unittest discover -s tests -v
 ```

@@ -1,6 +1,6 @@
 #!/bin/bash
 #==============================================================
-# Oracle 巡检统一入口
+# OraSentry Linux 巡检统一入口
 # 根据当前用户自动分发到对应采集脚本:
 #   root 用户   -> main_host.sh (主机巡检)
 #   oracle 用户 -> main_db.sh   (数据库+安全巡检)
@@ -9,7 +9,7 @@
 COLLECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 show_help() {
-    echo "Oracle 巡检数据采集工具 v4.2"
+    echo "OraSentry Linux 巡检数据采集工具 v4.3"
     echo ""
     echo "用法: $0 [选项]"
     echo ""

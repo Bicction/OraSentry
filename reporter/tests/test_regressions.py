@@ -93,11 +93,11 @@ class RegressionTests(unittest.TestCase):
         rows = _parse_pipe_table("A|B|C\n1||3\n")
         self.assertEqual(rows[1], ["1", "", "3"])
 
-    def test_v42_reporter_and_windows_version_are_consistent(self):
-        self.assertEqual(APP_VERSION, "4.2.0")
+    def test_v43_reporter_and_windows_version_are_consistent(self):
+        self.assertEqual(APP_VERSION, "4.3.0")
         version_info = Path(ROOT, "tools", "version_info.txt").read_text(encoding="utf-8")
-        self.assertIn("filevers=(4, 2, 0, 0)", version_info)
-        self.assertIn("ProductVersion', '4.2.0.0'", version_info)
+        self.assertIn("filevers=(4, 3, 0, 0)", version_info)
+        self.assertIn("ProductVersion', '4.3.0.0'", version_info)
 
     def test_collection_integrity_detects_sqlplus_error(self):
         with tempfile.TemporaryDirectory() as td:

@@ -8,7 +8,7 @@ COLLECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${COLLECT_DIR}/lib/common.sh"
 
 show_help() {
-    echo "主机巡检采集工具 v4.2"
+    echo "主机巡检采集工具 v4.3"
     echo ""
     echo "用法: $0 [选项]"
     echo ""
@@ -37,7 +37,7 @@ main() {
     fi
 
     echo "============================================"
-    echo "  主机巡检数据采集 v4.2"
+    echo "  主机巡检数据采集 v4.3"
     echo "============================================"
     echo ""
 
@@ -54,7 +54,10 @@ main() {
 
     local collect_rc=0
     finalize_collection || collect_rc=$?
-    pack_collection "host_check_${CHECK_TIMESTAMP}.tar.gz" || collect_rc=1
+    local safe_hostname
+    safe_hostname="$(hostname 2>/dev/null || echo host)"
+    safe_hostname="${safe_hostname//[!A-Za-z0-9_.-]/_}"
+    pack_collection "host_check_${safe_hostname}_${CHECK_TIMESTAMP}.tar.gz" || collect_rc=1
 
     local duration=$(( $(date +%s) - start_time ))
     print_collect_summary "主机巡检采集完成!" "${duration}" \

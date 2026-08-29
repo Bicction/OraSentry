@@ -1,6 +1,6 @@
-# Oracle 巡检报告生成端 v4.2
+# Oracle 巡检报告生成端 v4.3
 
-该目录是可独立复制到 Windows 的报告程序。它读取 `collector` 生成的 tar.gz，进行解析和阈值判定，一次同步输出 HTML 与 Word（DOCX）报告。
+该目录是可独立复制到 Windows 的报告程序。它读取 `collector-linux` 或 `collector-windows` 生成的 tar.gz，根据包内 `platform` 解析，进行阈值判定并同步输出 HTML 与 Word（DOCX）报告。
 
 ## 目录
 
@@ -101,7 +101,7 @@ Windows 环境安装 Microsoft Word 时，报告器会在后台调用 Word 分�
 
 构建产物为 `dist/OracleReport.exe`。构建脚本会安装 `python-docx`、`lxml` 和 PyInstaller；最终用户不需要安装 Python 或 Office 组件即可生成 DOCX。
 
-构建同时生成 `OracleReport.exe.sha256`，EXE 内含 4.2.0.0 版本资源。正式分发前，建议使用组织的代码签名证书和 Windows SDK `signtool.exe` 执行 Authenticode 签名。
+构建同时生成 `OracleReport.exe.sha256`，EXE 内含 4.3.0.0 版本资源。正式分发前，建议使用组织的代码签名证书和 Windows SDK `signtool.exe` 执行 Authenticode 签名。
 
 ## 测试
 
@@ -112,7 +112,7 @@ python -m py_compile gui.py report_gen.py docx_gen.py summary_gen.py config.py p
 
 ## 数据边界
 
-报告端不读取 `collector` 源码。双方唯一契约是收集包内部的：
+报告端不读取任何 Collector 源码。双方唯一契约是收集包内部的：
 
 - `env.info`
 - `collection_manifest.tsv`

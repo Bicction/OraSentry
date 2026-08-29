@@ -1,9 +1,15 @@
 # 变更记录
 
-## 未发布
+## 4.3.0 - 2026-08-30
 
 ### 采集与认证
 
+- 新增 `collector-windows` 原生 PowerShell 5.1 采集端，支持 Windows 主机、Oracle 数据库、安全配置、Alert Log、Trace、Listener 和 NTFS ACL 巡检。
+- 原 Linux `collector` 更名为 `collector-linux`，统一入口更名为 `OraSentry.sh`，并增加 `platform=linux` 协议字段。
+- Linux 与 Windows 主机采集包统一为 `host_check_<hostname>_<timestamp>.tar.gz`；数据库包继续使用 `db_check_<SID>_<timestamp>.tar.gz`。
+- 数据协议升级为 4.3，同一报告器根据 `platform` 分流主机与操作系统安全解析，同时继续接受历史 4.x 包。
+- Windows Collector 内置 ustar+gzip 打包实现，不依赖 Windows Server 是否预装 `tar.exe`。
+- 采集打包不再生成同名 `.sha256` 校验文件，打包阶段只输出 tar.gz 数据压缩包。
 - `check.conf` 新增默认关闭的 `DB_INTERACTIVE_LOGIN`；开启后运行时依次提示 IP、端口、连接类型、服务名/SID、账号、隐藏密码和角色，同时避免密码进入配置、进程参数、调试日志及采集包。连接类型默认使用与 Easy Connect `主机:端口/服务名` 一致的 `SERVICE_NAME`，并保留显式 SID 连接。
 - 数据库 SQL*Plus 调用统一经过安全连接入口，保留既有 OS 认证和 Oracle Wallet 模式，并支持 11g 的 `SYSDBA`、`SYSOPER` 与普通角色登录。
 - 交互认证改为先以 `/nolog` 启动 SQL*Plus，再通过标准输入执行包含安全引用密码的 `CONNECT`，修复 19c 将无密码角色登录误判为 `SP2-0306` 或不触发密码提示的问题；密码仍不进入进程参数、配置与日志。
@@ -11,6 +17,9 @@
 
 ### 评分与报告
 
+- 新增 Windows 固定卷、CPU、内存、页面文件、磁盘延迟、登录事件、防火墙、时间同步、监听端口、事件日志和 Oracle 服务报告项。
+- Linux inode、sysctl、HugePages/THP 等项目在 Windows 报告中明确标记为不适用，不参与健康评分。
+- Windows Oracle Home、二进制、网络配置与密码文件改按 NTFS ACL 检查宽泛写权限。
 - 健康评分改为按适用检查项业务权重归一化，取消固定扣分和 59/79 分硬封顶。
 - 新增 `INFO` 与 `UNKNOWN` 状态；AWR按配置关闭、架构不适用和采集完整性不再冒充正常项或重复扣减健康分。
 - 风险状态、健康评分和数据可信度独立展示，采集失败时评分明确标记为仅供参考。

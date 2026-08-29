@@ -5,12 +5,16 @@
 """
 import re
 from typing import Dict, List, Optional, Tuple
-from parser.base import CheckResult, check_threshold, read_file, read_lines, generate_bar_chart, generate_data_table
+from parser.base import CheckResult, check_threshold, read_file, read_lines, generate_bar_chart, generate_data_table, parse_env_info
 from config import HOST_THRESHOLDS
 
 
 def parse_host(raw_dir: str) -> List[CheckResult]:
     """解析主机巡检数据，返回巡检结果列表"""
+    platform = str(parse_env_info(raw_dir).get("platform", "linux")).strip().lower()
+    if platform == "windows":
+        from parser.windows_host_parser import parse_windows_host
+        return parse_windows_host(raw_dir)
     results = []
     host_dir = f"{raw_dir}/host"
 

@@ -9,10 +9,10 @@ if [[ -n "${ORACLE_CHECK_COMMON_LOADED:-}" ]]; then
     return 0
 fi
 ORACLE_CHECK_COMMON_LOADED=1
-COLLECTOR_VERSION="4.2.0"
-SCHEMA_VERSION="4.2"
+COLLECTOR_VERSION="4.3.0"
+SCHEMA_VERSION="4.3"
 
-# collector/lib -> collector
+# collector-linux/lib -> collector-linux
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COLLECT_DIR="$(cd "${LIB_DIR}/.." && pwd)"
 CONF_FILE="${COLLECT_DIR}/conf/check.conf"
@@ -305,6 +305,8 @@ write_env_base() {
         echo "schema_version=${SCHEMA_VERSION}"
         echo "collector_version=${COLLECTOR_VERSION}"
         echo "data_classification=confidential"
+        echo "platform=linux"
+        echo "platform_family=linux"
         echo "hostname=$(hostname)"
         echo "server_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || hostname -i 2>/dev/null || echo 'N/A')"
         echo "os=$(uname -a)"
@@ -479,13 +481,6 @@ pack_collection() {
     local pack_file="${RAW_BASE}/${pack_name}"
     if tar -czf "${pack_file}" -C "${RAW_DIR}" .; then
         chmod 0660 "${pack_file}" 2>/dev/null || true
-        if command -v sha256sum >/dev/null 2>&1; then
-            (
-                cd "${RAW_BASE}" || exit 1
-                sha256sum "${pack_name}" > "${pack_name}.sha256"
-                chmod 0660 "${pack_name}.sha256" 2>/dev/null || true
-            ) || log_warn "未能生成采集包校验文件"
-        fi
         log_info "数据已打包: ${pack_file}"
         export PACK_FILE="${pack_file}"
         return 0
