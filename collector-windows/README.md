@@ -14,6 +14,16 @@ PowerShell 源文件使用 UTF-8 BOM，以兼容 Windows PowerShell 5.1 的中�
 
 ## 使用
 
+首次使用先按需修改 `conf\check.psd1`，然后直接双击：
+
+```text
+开始巡检.cmd
+```
+
+启动器会检查 Windows PowerShell 5.1、申请管理员权限、按配置执行主机与数据库巡检，并在结束窗口中列出本次生成的采集包。无需手工打开命令行；如果启用了 `DB_INTERACTIVE_LOGIN`，窗口会继续提示输入数据库连接参数和隐藏密码。
+
+以下命令行入口仍保留，供计划任务、批处理或故障排查使用。
+
 默认同时采集主机和数据库，但仍生成两份相互独立的采集包：
 
 ```powershell
@@ -46,17 +56,20 @@ output\raw\db_check_<SID>_<timestamp>.tar.gz
 
 ## 配置
 
-配置文件为 `conf\check.psd1`。`OracleSid` 和 `OracleHome` 留空时，程序依次从当前进程环境、Oracle 注册表和 `OracleService<SID>` 服务探测。检测到多个实例时必须显式指定 SID。
+配置文件为 `conf\check.psd1`，键名与 Linux 版 `conf/check.conf` 保持一致。`ORACLE_SID` 和 `ORACLE_HOME` 留空时，程序依次从当前进程环境、Oracle 注册表和 `OracleService<SID>` 服务探测。检测到多个实例时必须显式指定 SID。
 
 默认配置：
 
 ```powershell
-OracleSid = ""
-OracleHome = ""
-AuthMode = "OS"
-WalletAlias = ""
-CheckAwr = $false
-CollectSqlText = $false
+ORACLE_SID = ""
+ORACLE_HOME = ""
+DB_INTERACTIVE_LOGIN = "off"
+DB_WALLET_ALIAS = ""
+CHECK_HOST = "on"
+CHECK_DB = "on"
+CHECK_SECURITY = "on"
+CHECK_AWR = "off"
+COLLECT_SQL_TEXT = "off"
 ```
 
 禁止在配置文件中增加数据库密码。SQL 文本和 AWR 默认关闭，启用前需确认数据分类及 Oracle 授权。
@@ -73,20 +86,24 @@ CONNECT / AS SYSDBA
 
 ### Oracle Wallet
 
-在 `check.psd1` 中设置：
+在 `check.psd1` 中设置 Wallet 别名，并保持交互登录关闭：
 
 ```powershell
-AuthMode = "Wallet"
-WalletAlias = "orcl_wallet"
+DB_INTERACTIVE_LOGIN = "off"
+DB_WALLET_ALIAS = "orcl_wallet"
 ```
 
 ### 运行时交互认证
 
+在 `check.psd1` 中设置：
+
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\OraSentry.ps1 -Database -InteractiveLogin
+DB_INTERACTIVE_LOGIN = "on"
 ```
 
-程序会提示账号、数据库地址、端口、连接类型、服务名/SID、角色和隐藏密码。密码仅保存在当前 PowerShell 进程内存中，通过 SQL*Plus 标准输入建立连接，不写入参数、配置、日志或采集包。
+之后双击 `开始巡检.cmd`，程序会提示账号、数据库地址、端口、连接类型、服务名/SID、角色和隐藏密码。密码仅保存在当前 PowerShell 进程内存中，通过 SQL*Plus 标准输入建立连接，不写入参数、配置、日志或采集包。
+
+命令行临时覆盖仍可使用 `powershell -ExecutionPolicy Bypass -File .\OraSentry.ps1 -Database -InteractiveLogin`，无需修改配置文件。
 
 远程数据库连接只能完成 SQL 指标采集。Alert Log、Trace、Windows 服务、事件日志和 ACL 仍读取 Collector 所在服务器，因此完整巡检必须在目标数据库服务器本地运行。
 

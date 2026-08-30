@@ -14,7 +14,8 @@ from docx import Document
 from docx.oxml.ns import qn
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+SOURCE_ROOT = ROOT / "src"
+sys.path.insert(0, str(SOURCE_ROOT))
 
 from config import REPORT_CONFIG
 from parser.base import CheckResult, generate_data_table, parse_collection_integrity

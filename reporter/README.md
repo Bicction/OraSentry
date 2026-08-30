@@ -6,14 +6,16 @@
 
 ```text
 reporter/
-├── gui.py                         # 图形界面
-├── report_gen.py                  # 命令行与共用生成逻辑
-├── docx_gen.py                    # 企业级 Word 报告渲染器
-├── summary_gen.py                 # 多份报告汇总摘要
-├── config.py                      # 报告阈值
 ├── requirements.txt               # 源码运行依赖
-├── parser/                        # 主机、数据库、安全解析器
-├── templates/html_template.html
+├── requirements-build.txt         # Windows 构建依赖
+├── src/                           # Python 业务源码
+│   ├── gui.py                     # 图形界面入口
+│   ├── report_gen.py              # 命令行与共用生成逻辑
+│   ├── docx_gen.py                # 企业级 Word 报告渲染器
+│   ├── summary_gen.py             # 多份报告汇总摘要
+│   ├── config.py                  # 报告阈值
+│   └── parser/                    # 主机、数据库、安全解析器
+├── resources/templates/           # HTML 报告模板
 ├── tools/                         # Windows exe 构建
 ├── tests/                         # Python 回归测试
 ├── output/raw/                    # 可放入收集包
@@ -44,22 +46,22 @@ reporter/
 python -m pip install -r requirements.txt
 
 # 图形界面
-python gui.py
+python src\gui.py
 
 # 单个收集包
-python report_gen.py output\raw\db_check_orcl_20260820_120000.tar.gz
+python src\report_gen.py output\raw\db_check_orcl_20260820_120000.tar.gz
 
 # 同时输入主机包与数据库包，分别生成两份报告
-python report_gen.py output\raw\host_check_20260820_120000.tar.gz `
+python src\report_gen.py output\raw\host_check_20260820_120000.tar.gz `
   output\raw\db_check_orcl_20260820_120000.tar.gz `
   -o output\report
 
 # 多套数据库：各出一份 Oracle 详细报告，并默认再生成汇总摘要
-python report_gen.py db_orcl.tar.gz db_prod.tar.gz
-python report_gen.py db_orcl.tar.gz db_prod.tar.gz --no-summary
+python src\report_gen.py db_orcl.tar.gz db_prod.tar.gz
+python src\report_gen.py db_orcl.tar.gz db_prod.tar.gz --no-summary
 
 # 自动填写每份详细报告末尾的“总结”章节
-python report_gen.py db_orcl.tar.gz --generate-summary
+python src\report_gen.py db_orcl.tar.gz --generate-summary
 ```
 
 不指定 `-o` 时，源码模式默认输出到 `reporter/output/report/`。数据库报告使用 `Oracle巡检报告_<SID>_<YYYYMMDD>`，主机报告使用 `主机巡检报告_<主机名>_<YYYYMMDD>`。无论 GUI、命令行还是 `OracleReport.exe`，都会走同一命名逻辑并同步生成同名 HTML 和 DOCX。`--generate-summary` 用于填写每份详细报告末尾的“总结”章节，默认关闭。两份及以上 Oracle 报告时，额外生成 `Oracle巡检汇总摘要_<YYYYMMDD>`，可用 `--no-summary` 关闭。
@@ -107,7 +109,7 @@ Windows 环境安装 Microsoft Word 时，报告器会在后台调用 Word 分�
 
 ```powershell
 python -m unittest discover -s tests -v
-python -m py_compile gui.py report_gen.py docx_gen.py summary_gen.py config.py parser\*.py
+python -m compileall -q src
 ```
 
 ## 数据边界

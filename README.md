@@ -7,7 +7,7 @@ Oracle 主机、数据库与安全巡检工具。项目采用离线两段式架�
 ## v4.3 重点
 
 - 新增原生 Windows PowerShell 5.1 Collector，覆盖 Windows 主机性能、服务、事件日志、ACL、Oracle 数据库与安全巡检。
-- Linux 采集端更名为 `collector-linux`，统一入口为 `OraSentry.sh`；Windows 入口为 `OraSentry.ps1`。
+- Linux 采集端更名为 `collector-linux`，统一入口为 `OraSentry.sh`；Windows 可双击 `开始巡检.cmd`，同时保留 `OraSentry.ps1` 命令行入口。
 - Linux 与 Windows 均生成 `host_check_<hostname>_<timestamp>.tar.gz` 和 `db_check_<SID>_<timestamp>.tar.gz`。
 - 采集协议升级为 `schema_version=4.3`，通过 `platform=linux/windows` 分流；报告端继续兼容所有 4.x 包。
 - 禁止在配置中保存 `DB_USER/DB_PASS` 明文认证，支持 OS 认证、运行时隐藏输入和 Oracle Wallet。
@@ -24,11 +24,11 @@ Oracle 主机、数据库与安全巡检工具。项目采用离线两段式架�
 - Linux 采集端：[collector-linux/README.md](collector-linux/README.md)
 - Windows 采集端：[collector-windows/README.md](collector-windows/README.md)
 - 报告端说明：[reporter/README.md](reporter/README.md)
-- v4.3 升级说明：[MIGRATION-v4.3.md](MIGRATION-v4.3.md)
-- v4.2 升级说明：[MIGRATION-v4.2.md](MIGRATION-v4.2.md)
-- v4.0 升级说明：[MIGRATION-v4.1.md](MIGRATION-v4.1.md)
-- 安全边界：[SECURITY.md](SECURITY.md)
-- 变更记录：[CHANGELOG.md](CHANGELOG.md)
+- v4.3 升级说明：[doc/MIGRATION-v4.3.md](doc/MIGRATION-v4.3.md)
+- v4.2 升级说明：[doc/MIGRATION-v4.2.md](doc/MIGRATION-v4.2.md)
+- v4.0 升级说明：参见 [doc/CHANGELOG.md](doc/CHANGELOG.md) 中的 4.1.0 记录
+- 安全边界：[doc/SECURITY.md](doc/SECURITY.md)
+- 变更记录：[doc/CHANGELOG.md](doc/CHANGELOG.md)
 
 ## 验证
 

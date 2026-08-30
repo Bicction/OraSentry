@@ -10,8 +10,8 @@ function Find-OracleSid {
         ForEach-Object { [regex]::Match($_.Name, '^OracleService(.+)$').Groups[1].Value } |
         Sort-Object -Unique)
     if ($sids.Count -eq 1) { return [string]$sids[0] }
-    if ($sids.Count -gt 1) { throw "检测到多个 Oracle SID（$($sids -join ', ')），请在 conf/check.psd1 中指定 OracleSid" }
-    throw "未检测到 Oracle SID，请在 conf/check.psd1 中指定 OracleSid"
+    if ($sids.Count -gt 1) { throw "检测到多个 Oracle SID（$($sids -join ', ')），请在 conf/check.psd1 中指定 ORACLE_SID" }
+    throw "未检测到 Oracle SID，请在 conf/check.psd1 中指定 ORACLE_SID"
 }
 
 function Find-OracleHome {
@@ -46,7 +46,7 @@ function Find-OracleHome {
             return [System.IO.Path]::GetFullPath($candidate)
         }
     }
-    throw "无法定位包含 bin\sqlplus.exe 的 Oracle Home，请在 conf/check.psd1 中指定 OracleHome"
+    throw "无法定位包含 bin\sqlplus.exe 的 Oracle Home，请在 conf/check.psd1 中指定 ORACLE_HOME"
 }
 
 function Initialize-OracleConnection {
@@ -100,7 +100,7 @@ function Initialize-OracleConnection {
             $Context.ConnectDescriptor = "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=$hostName)(PORT=$port))(CONNECT_DATA=($connectType=$connectName)))"
             $Context.LoginRole = $role
         }
-        default { throw "AuthMode 只支持 OS、Wallet 或 Interactive" }
+        default { throw "数据库认证配置无效" }
     }
 
     Add-EnvironmentInfo $Context @(

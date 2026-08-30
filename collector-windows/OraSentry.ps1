@@ -20,7 +20,7 @@ $collectorRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 if (-not $ConfigFile) { $ConfigFile = Join-Path $collectorRoot "conf\check.psd1" }
 if (-not (Test-Path -LiteralPath $ConfigFile -PathType Leaf)) { throw "配置文件不存在: $ConfigFile" }
-$config = Import-PowerShellDataFile -LiteralPath $ConfigFile
+$config = ConvertTo-CollectorConfig (Import-PowerShellDataFile -LiteralPath $ConfigFile)
 
 if (-not $HostCheck -and -not $DatabaseCheck -and -not $All) { $All = $true }
 $doHost = ($HostCheck -or $All) -and [bool]$config.CheckHost

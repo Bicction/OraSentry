@@ -15,7 +15,8 @@ POWERSHELL = shutil.which("powershell") or shutil.which("powershell.exe")
 class WindowsCollectorTests(unittest.TestCase):
     def test_bundle_contains_required_files(self):
         required = (
-            "OraSentry.ps1", "main_host.ps1", "main_db.ps1", "conf/check.psd1",
+            "OraSentry.ps1", "Start-OraSentry.ps1", "开始巡检.cmd",
+            "main_host.ps1", "main_db.ps1", "conf/check.psd1",
             "lib/Common.ps1", "lib/Package.ps1", "lib/HostCheck.ps1",
             "lib/Oracle.ps1", "lib/DatabaseCheck.ps1", "lib/SecurityCheck.ps1",
         )
@@ -29,7 +30,46 @@ class WindowsCollectorTests(unittest.TestCase):
     def test_config_never_contains_plaintext_password_field(self):
         config = (ROOT / "conf" / "check.psd1").read_text(encoding="utf-8-sig")
         self.assertNotRegex(config, r"(?im)^\s*(DB_)?PASS(WORD)?\s*=")
-        self.assertIn('AuthMode = "OS"', config)
+        self.assertIn('DB_INTERACTIVE_LOGIN = "off"', config)
+        self.assertIn('DB_WALLET_ALIAS = ""', config)
+        self.assertNotIn('AuthMode =', config)
+
+    def test_config_keys_match_linux_collector(self):
+        windows_config = (ROOT / "conf" / "check.psd1").read_text(encoding="utf-8-sig")
+        linux_config = (ROOT.parent / "collector-linux" / "conf" / "check.conf").read_text(encoding="utf-8")
+        keys = (
+            "DB_INTERACTIVE_LOGIN", "ORACLE_SID", "ORACLE_HOME", "DB_WALLET_ALIAS",
+            "CHECK_HOST", "CHECK_DB", "CHECK_SECURITY", "CHECK_AWR", "COLLECT_SQL_TEXT",
+            "RAW_DATA_DIR", "DEBUG", "REPORT_FOOTER",
+        )
+        for key in keys:
+            self.assertIn(key, windows_config)
+            self.assertIn(key, linux_config)
+
+    def test_double_click_launcher_uses_powershell_and_keeps_password_off_command_line(self):
+        launcher = (ROOT / "开始巡检.cmd").read_text(encoding="utf-8")
+        starter = (ROOT / "Start-OraSentry.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("Start-OraSentry.ps1", launcher)
+        self.assertIn("-Verb RunAs", starter)
+        self.assertIn("ConvertTo-CollectorConfig", starter)
+        self.assertNotRegex(launcher + starter, r"(?i)(DB_)?PASS(WORD)?\s*=")
+
+    @unittest.skipUnless(POWERSHELL, "Windows PowerShell is not available")
+    def test_config_normalization_selects_authentication_mode(self):
+        common = str(ROOT / "lib" / "Common.ps1").replace("'", "''")
+        command = (
+            f". '{common}'; "
+            "$os=ConvertTo-CollectorConfig @{DB_INTERACTIVE_LOGIN='off';DB_WALLET_ALIAS=''}; "
+            "$wallet=ConvertTo-CollectorConfig @{DB_INTERACTIVE_LOGIN='off';DB_WALLET_ALIAS='orcl_wallet'}; "
+            "$interactive=ConvertTo-CollectorConfig @{DB_INTERACTIVE_LOGIN='on';DB_WALLET_ALIAS=''}; "
+            "$default=ConvertTo-CollectorConfig @{}; "
+            "if($os.AuthMode-ne'OS'-or$wallet.AuthMode-ne'Wallet'-or$interactive.AuthMode-ne'Interactive'-or$default.AuthMode-ne'OS'){exit 2}"
+        )
+        result = subprocess.run(
+            [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_protocol_and_platform_are_explicit(self):
         common = (ROOT / "lib" / "Common.ps1").read_text(encoding="utf-8-sig")

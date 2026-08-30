@@ -14,10 +14,10 @@ hidden_imports = (
 dnd_datas = collect_data_files("tkinterdnd2")
 
 a = Analysis(
-    ["../gui.py"],
-    pathex=[".."],
+    ["../src/gui.py"],
+    pathex=["../src"],
     binaries=[],
-    datas=[("../templates/html_template.html", "templates")] + dnd_datas,
+    datas=[("../resources/templates/html_template.html", "resources/templates")] + dnd_datas,
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},

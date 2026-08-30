@@ -7,7 +7,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+SOURCE_ROOT = ROOT / "src"
+sys.path.insert(0, str(SOURCE_ROOT))
 
 from parser.host_parser import parse_host
 from parser.security_parser import parse_security

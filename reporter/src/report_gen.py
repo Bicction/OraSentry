@@ -5,10 +5,10 @@ Oracle 巡检报告生成器 - 本地端
 读取服务器采集的原始数据，解析、判定，同时生成 HTML 和 DOCX 巡检报告
 
 用法:
-  python3 report_gen.py <raw_data_dir_or_tar.gz> [...] [-o output.html]
-  python3 report_gen.py ./output/raw/20260612_100000
-  python3 report_gen.py oracle_check_20260612_100000.tar.gz
-  python3 report_gen.py host_a.tar.gz host_b.tar.gz   # 多份报告时默认再生成汇总摘要
+  python src/report_gen.py <raw_data_dir_or_tar.gz> [...] [-o output.html]
+  python src/report_gen.py ./output/raw/20260612_100000
+  python src/report_gen.py oracle_check_20260612_100000.tar.gz
+  python src/report_gen.py host_a.tar.gz host_b.tar.gz   # 多份报告时默认再生成汇总摘要
 """
 import os
 import sys
@@ -22,7 +22,7 @@ from string import Template
 from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, List, Optional, Tuple
 
-# 添加 report 目录到路径
+# 添加源码目录到模块搜索路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import CATEGORY_NAMES, CATEGORY_ORDER, REPORT_CONFIG
@@ -778,14 +778,14 @@ class BatchOutputs:
 
 
 def resource_dir() -> str:
-    """报告程序资源目录。脚本运行用本文件所在目录；PyInstaller 打包后用 _MEIPASS。"""
+    """报告程序资源根目录。源码模式为 reporter，打包后为 _MEIPASS。"""
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         return sys._MEIPASS
-    return os.path.dirname(os.path.abspath(__file__))
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def template_path() -> str:
-    return os.path.join(resource_dir(), "templates", "html_template.html")
+    return os.path.join(resource_dir(), "resources", "templates", "html_template.html")
 
 
 def project_root() -> str:
@@ -1126,13 +1126,13 @@ def build_reports(input_paths: List[str], output_file: str = None,
 
 def main():
     if len(sys.argv) < 2:
-        print("用法: python3 report_gen.py <采集目录或tar.gz> [...] [-o output.html] [--summary|--no-summary] [--generate-summary]")
+        print("用法: python src/report_gen.py <采集目录或tar.gz> [...] [-o output.html] [--summary|--no-summary] [--generate-summary]")
         print("")
         print("示例:")
-        print("  python3 report_gen.py ./output/raw/20260612_100000")
-        print("  python3 report_gen.py oracle_check_20260612_100000.tar.gz")
-        print("  python3 report_gen.py host_check.tar.gz db_check.tar.gz -o report.html")
-        print("  python3 report_gen.py host_a.tar.gz host_b.tar.gz --summary")
+        print("  python src/report_gen.py ./output/raw/20260612_100000")
+        print("  python src/report_gen.py oracle_check_20260612_100000.tar.gz")
+        print("  python src/report_gen.py host_check.tar.gz db_check.tar.gz -o report.html")
+        print("  python src/report_gen.py host_a.tar.gz host_b.tar.gz --summary")
         sys.exit(1)
 
     args = sys.argv[1:]

@@ -15,6 +15,8 @@ Linux 自动化任务、上传脚本和运维文档需要同步修改路径。`m
 
 ```text
 collector-windows/
+├── 开始巡检.cmd
+├── Start-OraSentry.ps1
 ├── OraSentry.ps1
 ├── main_host.ps1
 ├── main_db.ps1
@@ -37,11 +39,11 @@ db_check_<SID>_<timestamp>.tar.gz
 
 ## Windows 部署
 
-把整个 `collector-windows` 目录复制到目标 Windows Oracle 服务器，使用 Windows PowerShell 5.1 运行。完整主机和安全巡检建议以管理员身份执行；数据库 OS 认证账号应属于本机 `ORA_DBA` 组。
+把整个 `collector-windows` 目录复制到目标 Windows Oracle 服务器，按需修改 `conf\check.psd1` 后双击 `开始巡检.cmd`。启动器使用 Windows PowerShell 5.1 并自动申请管理员权限；数据库 OS 认证账号应属于本机 `ORA_DBA` 组。`OraSentry.ps1`、`main_host.ps1` 和 `main_db.ps1` 继续作为自动化命令行入口。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\OraSentry.ps1 -Host
 powershell -ExecutionPolicy Bypass -File .\OraSentry.ps1 -Database
 ```
 
-配置文件不得保存数据库明文密码。可选择 OS 认证、Oracle Wallet 或 `-InteractiveLogin` 运行时隐藏输入。
+配置文件不得保存数据库明文密码。Windows 与 Linux 使用一致的 `DB_INTERACTIVE_LOGIN`、`DB_WALLET_ALIAS`、`ORACLE_SID`、`ORACLE_HOME` 和巡检开关键名。`DB_INTERACTIVE_LOGIN=on` 时运行时隐藏输入；关闭时优先使用 Wallet 别名，否则使用 OS 认证。命令行仍可用 `-InteractiveLogin` 临时覆盖。
