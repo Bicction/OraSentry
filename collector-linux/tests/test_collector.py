@@ -43,6 +43,18 @@ class CollectorTests(unittest.TestCase):
         for relative_path in required:
             self.assertTrue((ROOT / relative_path).is_file(), relative_path)
 
+    def test_linux_scripts_and_config_use_lf_line_endings(self):
+        files = [
+            ROOT / "OraSentry.sh",
+            ROOT / "main_host.sh",
+            ROOT / "main_db.sh",
+            *sorted((ROOT / "lib").glob("*.sh")),
+            *sorted((ROOT / "conf").glob("*.conf")),
+        ]
+        for path in files:
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertNotIn(b"\r", path.read_bytes())
+
     def test_output_is_relative_to_collector_root(self):
         common = (ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
         self.assertIn('raw_base="${COLLECT_DIR}/${RAW_DATA_DIR}"', common)

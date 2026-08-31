@@ -107,6 +107,32 @@ function Write-CollectorLog {
     [System.IO.File]::AppendAllText($Context.LogFile, $line + "`r`n", $script:Utf8NoBom)
 }
 
+function Write-CollectorErrorRecord {
+    param(
+        [Parameter(Mandatory=$true)]$Context,
+        [Parameter(Mandatory=$true)][System.Management.Automation.ErrorRecord]$ErrorRecord,
+        [string]$Prefix = ""
+    )
+    Write-CollectorLog -Context $Context -Level "ERROR" -Message ($Prefix + $ErrorRecord.Exception.Message)
+    $invocation = $ErrorRecord.InvocationInfo
+    if ($invocation) {
+        $scriptName = if ($invocation.ScriptName) { $invocation.ScriptName } else { "<interactive>" }
+        $commandName = if ($invocation.MyCommand -and $invocation.MyCommand.Name) { $invocation.MyCommand.Name } else { "<unknown>" }
+        Write-CollectorLog -Context $Context -Level "ERROR" -Message (
+            "错误位置: {0}:{1}:{2}; command={3}" -f $scriptName, $invocation.ScriptLineNumber, $invocation.OffsetInLine, $commandName
+        )
+    }
+    if ($ErrorRecord.FullyQualifiedErrorId -or $ErrorRecord.CategoryInfo) {
+        Write-CollectorLog -Context $Context -Level "ERROR" -Message (
+            "错误标识: {0}; category={1}" -f $ErrorRecord.FullyQualifiedErrorId, $ErrorRecord.CategoryInfo
+        )
+    }
+    if ($ErrorRecord.ScriptStackTrace) {
+        $stack = ($ErrorRecord.ScriptStackTrace -replace "`r?`n", " <- ").Trim()
+        Write-CollectorLog -Context $Context -Level "ERROR" -Message "调用栈: $stack"
+    }
+}
+
 function Add-CollectionManifest {
     param(
         [Parameter(Mandatory=$true)]$Context,
@@ -142,7 +168,7 @@ function Invoke-CollectionAction {
             Add-CollectionManifest -Context $Context -Item $Item -Type $Type -Status "WARN" -ExitCode 1 -Message $message
             return
         }
-        Write-CollectorLog -Context $Context -Level "ERROR" -Message "$Item 采集失败: $message"
+        Write-CollectorErrorRecord -Context $Context -ErrorRecord $_ -Prefix "$Item 采集失败: "
         Add-CollectionManifest -Context $Context -Item $Item -Type $Type -Status "FAILED" -ExitCode 1 -Message $message
         return
     }

@@ -14,6 +14,15 @@ function Find-OracleSid {
     throw "未检测到 Oracle SID，请在 conf/check.psd1 中指定 ORACLE_SID"
 }
 
+function Get-OracleHomeFromRegistryKey {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    $values = Get-ItemProperty -LiteralPath $Path -Name ORACLE_HOME -ErrorAction SilentlyContinue
+    if (-not $values) { return "" }
+    $oracleHomeProperty = $values.PSObject.Properties["ORACLE_HOME"]
+    if (-not $oracleHomeProperty -or -not $oracleHomeProperty.Value) { return "" }
+    return [string]$oracleHomeProperty.Value
+}
+
 function Find-OracleHome {
     param([hashtable]$Config, [string]$OracleSid)
     $candidates = New-Object System.Collections.Generic.List[string]
@@ -21,11 +30,22 @@ function Find-OracleHome {
     $fromEnvironment = [Environment]::GetEnvironmentVariable("ORACLE_HOME", "Process")
     if ($fromEnvironment) { $candidates.Add($fromEnvironment) }
 
+    # CMD 能直接运行 sqlplus 时，可能只配置了 PATH 而没有配置 ORACLE_HOME。
+    $sqlPlusFromPath = Get-Command sqlplus.exe -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($sqlPlusFromPath -and $sqlPlusFromPath.Source) {
+        $sqlPlusPath = [string]$sqlPlusFromPath.Source
+        $binDirectory = Split-Path -Parent $sqlPlusPath
+        if ((Split-Path -Leaf $binDirectory) -ieq "bin") {
+            $candidates.Add((Split-Path -Parent $binDirectory))
+        }
+    }
+
     foreach ($root in @("HKLM:\SOFTWARE\Oracle", "HKLM:\SOFTWARE\WOW6432Node\Oracle")) {
         if (-not (Test-Path $root)) { continue }
         foreach ($key in Get-ChildItem $root -ErrorAction SilentlyContinue) {
-            $home = (Get-ItemProperty $key.PSPath -Name ORACLE_HOME -ErrorAction SilentlyContinue).ORACLE_HOME
-            if ($home) { $candidates.Add([string]$home) }
+            $registryOracleHome = Get-OracleHomeFromRegistryKey $key.PSPath
+            if ($registryOracleHome) { $candidates.Add($registryOracleHome) }
         }
     }
 
@@ -57,12 +77,12 @@ function Initialize-OracleConnection {
     )
     $sid = if ($Context.OracleSid) { $Context.OracleSid } else { Find-OracleSid $Config }
     if ($sid -notmatch '^[A-Za-z0-9_.-]+$') { throw "OracleSid 包含不允许的字符" }
-    $home = Find-OracleHome $Config $sid
+    $oracleHome = Find-OracleHome $Config $sid
     $Context.OracleSid = $sid
-    $Context.OracleHome = $home
-    $Context.SqlPlus = Join-Path $home "bin\sqlplus.exe"
+    $Context.OracleHome = $oracleHome
+    $Context.SqlPlus = Join-Path $oracleHome "bin\sqlplus.exe"
     [Environment]::SetEnvironmentVariable("ORACLE_SID", $sid, "Process")
-    [Environment]::SetEnvironmentVariable("ORACLE_HOME", $home, "Process")
+    [Environment]::SetEnvironmentVariable("ORACLE_HOME", $oracleHome, "Process")
     [Environment]::SetEnvironmentVariable("NLS_LANG", ".AL32UTF8", "Process")
 
     $mode = if ($InteractiveLogin) { "Interactive" } else { [string]$Config.AuthMode }
@@ -105,10 +125,10 @@ function Initialize-OracleConnection {
 
     Add-EnvironmentInfo $Context @(
         "oracle_sid=$sid",
-        "oracle_home=$home",
+        "oracle_home=$oracleHome",
         "db_auth=$($Context.AuthMode)"
     )
-    Write-CollectorLog -Context $Context -Message "Oracle环境已初始化: SID=$sid, Home=$home, Auth=$($Context.AuthMode)"
+    Write-CollectorLog -Context $Context -Message "Oracle环境已初始化: SID=$sid, Home=$oracleHome, Auth=$($Context.AuthMode)"
 }
 
 function Get-OracleConnectCommand {
@@ -126,6 +146,84 @@ function Get-OracleConnectCommand {
         }
         default { throw "Oracle认证模式尚未初始化" }
     }
+}
+
+function Get-SqlPlusErrorLines {
+    param([AllowEmptyString()][string]$Text)
+    return @(($Text -split "`r?`n") | Where-Object { $_ -match '^(ORA|SP2|TNS|LRM)-\d+' })
+}
+
+function Filter-SqlPlusStartupWarnings {
+    param([AllowEmptyString()][string]$Text)
+    $keptLines = New-Object System.Collections.Generic.List[string]
+    $warningLines = New-Object System.Collections.Generic.List[string]
+    foreach ($line in ($Text -split "`r?`n")) {
+        if ($line -match '^(?i)SP2-0734:\s+unknown command beginning "[\uFEFF]?SET ECHO(?:\s|\.)') {
+            $warningLines.Add($line)
+        } else {
+            $keptLines.Add($line)
+        }
+    }
+    return [pscustomobject]@{
+        Output = $keptLines -join "`r`n"
+        Warnings = @($warningLines)
+    }
+}
+
+function Register-SqlPlusStartupWarnings {
+    param(
+        [Parameter(Mandatory=$true)]$Context,
+        [Parameter(Mandatory=$true)][AllowEmptyCollection()][string[]]$Warnings
+    )
+    if ($Warnings.Count -eq 0) { return }
+    $warningPath = Join-Path $Context.RawDir "sqlplus_startup_warning.log"
+    if (Test-Path -LiteralPath $warningPath) { return }
+    Write-CollectorLines -Path $warningPath -Lines @(
+        "SQL*Plus 启动脚本警告（已忽略，不影响 SQL 执行）：",
+        $Warnings,
+        "建议将 ORACLE_HOME\sqlplus\admin\glogin.sql 及用户 login.sql 保存为 UTF-8 无 BOM。"
+    )
+    $message = "SQL*Plus启动脚本的 SET ECHO 前含UTF-8 BOM，已忽略非致命SP2-0734；建议修复glogin.sql/login.sql编码"
+    Write-CollectorLog -Context $Context -Level "WARN" -Message $message
+    Add-CollectionManifest -Context $Context -Item "sqlplus_startup_profile" -Type "ENV" -Status "WARN" -ExitCode 0 -Message $message
+}
+
+function Write-SqlPlusDiagnostic {
+    param(
+        [Parameter(Mandatory=$true)]$Context,
+        [Parameter(Mandatory=$true)][string]$OutputFile,
+        [Parameter(Mandatory=$true)][string]$Sql,
+        [Parameter(Mandatory=$true)][int]$ExitCode,
+        [Parameter(Mandatory=$true)][AllowEmptyCollection()][string[]]$ErrorLines,
+        [AllowEmptyString()][string]$Output
+    )
+    $diagnosticPath = Join-Path $Context.RawDir "sqlplus_error.log"
+    $safeSql = ($Sql -replace "`r?`n", " ").Trim()
+    $lines = @(
+        "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] SQL*Plus failure",
+        "output_file=$OutputFile",
+        "exit_code=$ExitCode",
+        "sql=$safeSql",
+        "matched_errors=$(($ErrorLines -join ' | '))",
+        "--- sqlplus output ---",
+        $Output,
+        "--- end sqlplus output ---",
+        ""
+    )
+    [System.IO.File]::AppendAllText($diagnosticPath, ($lines -join "`r`n"), $script:Utf8NoBom)
+}
+
+function Write-Utf8NoBomProcessInput {
+    param(
+        [Parameter(Mandatory=$true)][System.Diagnostics.Process]$Process,
+        [Parameter(Mandatory=$true)][AllowEmptyString()][string]$Text
+    )
+    $cleanText = $Text.TrimStart([char]0xFEFF)
+    $bytes = $script:Utf8NoBom.GetBytes($cleanText)
+    $inputStream = $Process.StandardInput.BaseStream
+    $inputStream.Write($bytes, 0, $bytes.Length)
+    $inputStream.Flush()
+    $inputStream.Close()
 }
 
 function Invoke-OraSql {
@@ -173,17 +271,27 @@ EXIT
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $info
     if (-not $process.Start()) { throw "无法启动 sqlplus.exe" }
-    $process.StandardInput.Write($scriptText)
-    $process.StandardInput.Close()
+    Write-Utf8NoBomProcessInput -Process $process -Text $scriptText
     $stdout = $process.StandardOutput.ReadToEnd()
     $stderr = $process.StandardError.ReadToEnd()
     $process.WaitForExit()
     $combined = $stdout
     if ($stderr) { $combined += "`r`n" + $stderr }
+    $filteredOutput = Filter-SqlPlusStartupWarnings $combined
+    $startupWarnings = @($filteredOutput.Warnings)
+    Register-SqlPlusStartupWarnings -Context $Context -Warnings $startupWarnings
+    $combined = [string]$filteredOutput.Output
     Write-CollectorText -Path $OutputFile -Text $combined
-    if ($process.ExitCode -ne 0 -or $combined -match '(?m)^(ORA|SP2|TNS|LRM)-\d+') {
-        $summary = (($combined -split "`r?`n" | Select-Object -Last 3) -join " ").Trim()
-        throw "SQL*Plus执行失败(rc=$($process.ExitCode)): $summary"
+    $errorLines = @(Get-SqlPlusErrorLines $combined)
+    if ($process.ExitCode -ne 0 -or $errorLines.Count -gt 0) {
+        Write-SqlPlusDiagnostic -Context $Context -OutputFile $OutputFile -Sql $Sql `
+            -ExitCode $process.ExitCode -ErrorLines $errorLines -Output $combined
+        $summary = if ($errorLines.Count -gt 0) {
+            ($errorLines | Select-Object -First 5) -join " | "
+        } else {
+            (($combined -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 3) -join " ").Trim()
+        }
+        throw "SQL*Plus执行失败(rc=$($process.ExitCode)): $summary; 完整输出见 sqlplus_error.log"
     }
 }
 

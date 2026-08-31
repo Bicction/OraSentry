@@ -56,7 +56,7 @@ output\raw\db_check_<SID>_<timestamp>.tar.gz
 
 ## 配置
 
-配置文件为 `conf\check.psd1`，键名与 Linux 版 `conf/check.conf` 保持一致。`ORACLE_SID` 和 `ORACLE_HOME` 留空时，程序依次从当前进程环境、Oracle 注册表和 `OracleService<SID>` 服务探测。检测到多个实例时必须显式指定 SID。
+配置文件为 `conf\check.psd1`，键名与 Linux 版 `conf/check.conf` 保持一致。`ORACLE_SID` 和 `ORACLE_HOME` 留空时，程序依次从当前进程环境、`PATH` 中的 `sqlplus.exe`、Oracle 注册表和 `OracleService<SID>` 服务探测。检测到多个实例时必须显式指定 SID。
 
 默认配置：
 

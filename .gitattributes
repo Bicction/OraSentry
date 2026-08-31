@@ -1,0 +1,4 @@
+/collector-linux/*.sh text eol=lf
+/collector-linux/**/*.sh text eol=lf
+/collector-linux/*.conf text eol=lf
+/collector-linux/**/*.conf text eol=lf

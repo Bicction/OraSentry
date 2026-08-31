@@ -2,6 +2,7 @@
 """Windows Collector 协议、安全与打包回归测试。"""
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -64,6 +65,140 @@ class WindowsCollectorTests(unittest.TestCase):
             "$interactive=ConvertTo-CollectorConfig @{DB_INTERACTIVE_LOGIN='on';DB_WALLET_ALIAS=''}; "
             "$default=ConvertTo-CollectorConfig @{}; "
             "if($os.AuthMode-ne'OS'-or$wallet.AuthMode-ne'Wallet'-or$interactive.AuthMode-ne'Interactive'-or$default.AuthMode-ne'OS'){exit 2}"
+        )
+        result = subprocess.run(
+            [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(POWERSHELL, "Windows PowerShell is not available")
+    def test_oracle_initialization_does_not_overwrite_readonly_home(self):
+        common = str(ROOT / "lib" / "Common.ps1").replace("'", "''")
+        oracle = str(ROOT / "lib" / "Oracle.ps1").replace("'", "''")
+        command = (
+            f". '{common}'; . '{oracle}'; "
+            "$testRoot=Join-Path ([IO.Path]::GetTempPath()) ('orasentry-'+[guid]::NewGuid()); "
+            "try { "
+            "New-Item -ItemType Directory -Force -Path (Join-Path $testRoot 'bin')|Out-Null; "
+            "New-Item -ItemType File -Force -Path (Join-Path $testRoot 'bin\\sqlplus.exe')|Out-Null; "
+            "$logFile=Join-Path $testRoot 'collect.log'; "
+            "New-Item -ItemType File -Force -Path $logFile|Out-Null; "
+            "New-Item -ItemType File -Force -Path (Join-Path $testRoot 'env.info')|Out-Null; "
+            "$context=[pscustomobject]@{OracleSid='TEST';OracleHome='';SqlPlus='';AuthMode='';"
+            "ConnectDescriptor='';LoginUser='';SecurePassword=$null;LoginRole='SYSDBA';"
+            "RawDir=$testRoot;LogFile=$logFile}; "
+            "$config=@{OracleSid='TEST';OracleHome=$testRoot;AuthMode='OS';WalletAlias=''}; "
+            "Initialize-OracleConnection $context $config; "
+            "if($context.OracleHome-ne$testRoot-or$context.AuthMode-ne'os'){exit 2} "
+            "} finally { Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue }"
+        )
+        result = subprocess.run(
+            [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(POWERSHELL, "Windows PowerShell is not available")
+    def test_oracle_home_falls_back_to_sqlplus_on_path(self):
+        oracle = str(ROOT / "lib" / "Oracle.ps1").replace("'", "''")
+        command = (
+            f". '{oracle}'; "
+            "$testRoot=Join-Path ([IO.Path]::GetTempPath()) ('orasentry-path-'+[guid]::NewGuid()); "
+            "try { "
+            "$bin=Join-Path $testRoot 'bin'; "
+            "New-Item -ItemType Directory -Force -Path $bin|Out-Null; "
+            "New-Item -ItemType File -Force -Path (Join-Path $bin 'sqlplus.exe')|Out-Null; "
+            "[Environment]::SetEnvironmentVariable('ORACLE_HOME',$null,'Process'); "
+            "$env:PATH=$bin+[IO.Path]::PathSeparator+$env:PATH; "
+            "$found=Find-OracleHome @{OracleHome=''} 'TEST_PATH_FALLBACK'; "
+            "if($found-ne[IO.Path]::GetFullPath($testRoot)){exit 2} "
+            "} finally { Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue }"
+        )
+        result = subprocess.run(
+            [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(POWERSHELL, "Windows PowerShell is not available")
+    def test_oracle_registry_key_without_oracle_home_is_ignored(self):
+        oracle = str(ROOT / "lib" / "Oracle.ps1").replace("'", "''")
+        command = (
+            f". '{oracle}'; "
+            "function Get-ItemProperty { [pscustomobject]@{PSPath='HKLM:\\SOFTWARE\\Oracle\\KEY_XE'} }; "
+            "$missing=Get-OracleHomeFromRegistryKey 'HKLM:\\SOFTWARE\\Oracle\\KEY_XE'; "
+            "if($missing){exit 2}; "
+            "function Get-ItemProperty { [pscustomobject]@{ORACLE_HOME='C:\\Oracle\\dbhome_1'} }; "
+            "$found=Get-OracleHomeFromRegistryKey 'HKLM:\\SOFTWARE\\Oracle\\KEY_ORCL'; "
+            "if($found-ne'C:\\Oracle\\dbhome_1'){exit 3}"
+        )
+        result = subprocess.run(
+            [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(POWERSHELL, "Windows PowerShell is not available")
+    def test_error_log_contains_location_and_stack_trace(self):
+        common = str(ROOT / "lib" / "Common.ps1").replace("'", "''")
+        command = (
+            f". '{common}'; "
+            "$testRoot=Join-Path ([IO.Path]::GetTempPath()) ('orasentry-error-'+[guid]::NewGuid()); "
+            "try { "
+            "New-Item -ItemType Directory -Force -Path $testRoot|Out-Null; "
+            "$log=Join-Path $testRoot 'collect.log'; New-Item -ItemType File -Path $log|Out-Null; "
+            "$context=[pscustomobject]@{LogFile=$log}; "
+            "function Invoke-TestFailure { throw 'diagnostic-boom' }; "
+            "try { Invoke-TestFailure } catch { Write-CollectorErrorRecord $context $_ }; "
+            "$content=[IO.File]::ReadAllText($log,[Text.Encoding]::UTF8); "
+            "if($content-notmatch'diagnostic-boom'-or$content-notmatch'错误位置'-or$content-notmatch'调用栈'-or$content-notmatch'Invoke-TestFailure'){exit 2} "
+            "} finally { Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue }"
+        )
+        result = subprocess.run(
+            [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(POWERSHELL, "Windows PowerShell is not available")
+    def test_sqlplus_error_summary_uses_actual_error_lines(self):
+        oracle = str(ROOT / "lib" / "Oracle.ps1").replace("'", "''")
+        command = (
+            f". '{oracle}'; "
+            "$output=\"SP2-0734: unknown command`r`nVERSION`r`n-----------------`r`n19.0.0.0.0`r`n\"; "
+            "$errors=@(Get-SqlPlusErrorLines $output); "
+            "if($errors.Count-ne1-or$errors[0]-ne'SP2-0734: unknown command'){exit 2}; "
+            "$startup=\"SP2-0734: unknown command beginning `\"$([char]0xFEFF)SET ECHO ...`\" - rest of line ignored.`r`nVERSION`r`n19.0.0.0.0`r`n\"; "
+            "$filtered=Filter-SqlPlusStartupWarnings $startup; "
+            "if(@($filtered.Warnings).Count-ne1-or$filtered.Output-match'SP2-0734'-or@(Get-SqlPlusErrorLines $filtered.Output).Count-ne0){exit 3}; "
+            "$realError=Filter-SqlPlusStartupWarnings \"SP2-0734: unknown command beginning `\"BAD COMMAND`\"`r`n\"; "
+            "if(@(Get-SqlPlusErrorLines $realError.Output).Count-ne1){exit 4}"
+        )
+        result = subprocess.run(
+            [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(POWERSHELL, "Windows PowerShell is not available")
+    def test_sqlplus_standard_input_starts_without_utf8_bom(self):
+        common = str(ROOT / "lib" / "Common.ps1").replace("'", "''")
+        oracle = str(ROOT / "lib" / "Oracle.ps1").replace("'", "''")
+        python_exe = str(Path(sys.executable)).replace("'", "''")
+        command = (
+            f". '{common}'; . '{oracle}'; "
+            "$info=New-Object Diagnostics.ProcessStartInfo; "
+            f"$info.FileName='{python_exe}'; "
+            "$info.Arguments='-c \"import sys;print(sys.stdin.buffer.read().hex())\"'; "
+            "$info.UseShellExecute=$false; $info.RedirectStandardInput=$true; "
+            "$info.RedirectStandardOutput=$true; "
+            "$process=New-Object Diagnostics.Process; $process.StartInfo=$info; "
+            "if(-not$process.Start()){exit 2}; "
+            "$text=([char]0xFEFF)+'SET ECHO OFF'; "
+            "Write-Utf8NoBomProcessInput -Process $process -Text $text; "
+            "$hex=$process.StandardOutput.ReadToEnd().Trim(); $process.WaitForExit(); "
+            "if($hex-ne'534554204543484f204f4646'){exit 3}"
         )
         result = subprocess.run(
             [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],

@@ -36,7 +36,7 @@ if ($doHost) {
     try {
         Collect-WindowsHost $hostContext
     } catch {
-        Write-CollectorLog $hostContext "ERROR" $_.Exception.Message
+        Write-CollectorErrorRecord -Context $hostContext -ErrorRecord $_
         Add-CollectionManifest $hostContext "host_collection" "COLLECTOR" "FAILED" 1 $_.Exception.Message
     }
     if (-not (Complete-Collection $hostContext)) { $overallExit = 1 }
@@ -58,7 +58,7 @@ if ($doDatabase) {
         Collect-WindowsDatabase $dbContext $config
         if ([bool]$config.CheckSecurity) { Collect-WindowsSecurity $dbContext $config }
     } catch {
-        Write-CollectorLog $dbContext "ERROR" $_.Exception.Message
+        Write-CollectorErrorRecord -Context $dbContext -ErrorRecord $_
         Add-CollectionManifest $dbContext "database_environment" "COLLECTOR" "FAILED" 1 $_.Exception.Message
     }
     if (-not (Complete-Collection $dbContext)) { $overallExit = 1 }

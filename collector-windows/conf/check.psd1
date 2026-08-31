@@ -1,6 +1,6 @@
 ﻿@{
     # 配置项名称与 collector-linux/conf/check.conf 保持一致。
-    # 留空时依次从当前进程环境、Oracle 注册表和 OracleService 服务探测。
+    # 留空时依次从当前进程环境、PATH、Oracle 注册表和 OracleService 服务探测。
     ORACLE_SID = ""
     ORACLE_HOME = ""
 
