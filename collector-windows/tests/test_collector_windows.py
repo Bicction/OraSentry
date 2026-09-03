@@ -217,11 +217,73 @@ class WindowsCollectorTests(unittest.TestCase):
         self.assertIn('"host_check_{0}_{1}.tar.gz"', entry)
         self.assertIn('"db_check_{0}_{1}.tar.gz"', entry)
 
+    def test_independent_entries_forward_named_switches(self):
+        host_entry = (ROOT / "main_host.ps1").read_text(encoding="utf-8-sig")
+        db_entry = (ROOT / "main_db.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("-HostCheck -NoPack:$NoPack -ConfigFile $ConfigFile", host_entry)
+        self.assertIn("-DatabaseCheck -NoPack:$NoPack -InteractiveLogin:$InteractiveLogin", db_entry)
+        self.assertNotIn("@arguments", host_entry + db_entry)
+
     @unittest.skipUnless(POWERSHELL, "Windows PowerShell is not available")
     def test_database_query_catalog_loads_without_oracle(self):
         scripts = [ROOT / "lib" / name for name in ("Common.ps1", "Oracle.ps1", "DatabaseCheck.ps1")]
         prefix = "; ".join(". '" + str(path).replace("'", "''") + "'" for path in scripts)
-        command = prefix + "; $q=Get-DatabaseQueries $false; if($q.Count -lt 50 -or -not $q.Contains('instance_status.txt') -or -not $q.Contains('tablespaces.txt')){exit 2}"
+        command = prefix + "; $q=Get-DatabaseQueries $false; if($q.Count -lt 50 -or -not $q.Contains('instance_status.txt') -or -not $q.Contains('tablespaces.txt') -or -not $q.Contains('storage_paths.txt')){exit 2}"
+        result = subprocess.run(
+            [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(POWERSHELL, "Windows PowerShell is not available")
+    def test_windows_critical_event_and_firewall_classifiers(self):
+        host_check = str(ROOT / "lib" / "HostCheck.ps1").replace("'", "''")
+        command = (
+            f". '{host_check}'; "
+            "$storage=[pscustomobject]@{ProviderName='storport';Message='Reset to device';Id=129;Level=3}; "
+            "$classified=Get-WindowsCriticalEventClassification $storage; "
+            "if($classified.Category-ne'STORAGE_RESET'-or$classified.Severity-ne'WARN'){exit 2}; "
+            "$timeSuccess=[pscustomobject]@{ProviderName='Microsoft-Windows-Time-Service';Message='synchronized';Id=35;Level=4}; "
+            "if(Get-WindowsCriticalEventClassification $timeSuccess){exit 6}; "
+            "if(-not(Test-WindowsFirewallPortMatch '1521,5500-5510' 1521)){exit 3}; "
+            "if(-not(Test-WindowsFirewallPortMatch '1521,5500-5510' 5505)){exit 4}; "
+            "if(Test-WindowsFirewallPortMatch '1521,5500-5510' 8080){exit 5}"
+        )
+        result = subprocess.run(
+            [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_first_phase_windows_metrics_are_registered(self):
+        host_check = (ROOT / "lib" / "HostCheck.ps1").read_text(encoding="utf-8-sig")
+        database_check = (ROOT / "lib" / "DatabaseCheck.ps1").read_text(encoding="utf-8-sig")
+        for filename in (
+            "performance_samples.txt", "firewall_oracle_rules.txt", "critical_events.txt",
+            "oracle_processes.txt", "windows_maintenance.txt",
+        ):
+            self.assertIn(filename, host_check)
+        self.assertIn("storage_path_capacity.txt", database_check)
+        self.assertIn("Collect-WindowsStoragePathCapacity", database_check)
+
+    @unittest.skipUnless(POWERSHELL, "Windows PowerShell is not available")
+    def test_storage_path_capacity_ignores_sqlplus_separator_rows(self):
+        common = str(ROOT / "lib" / "Common.ps1").replace("'", "''")
+        database = str(ROOT / "lib" / "DatabaseCheck.ps1").replace("'", "''")
+        command = (
+            f". '{common}'; . '{database}'; "
+            "$testRoot=Join-Path ([IO.Path]::GetTempPath()) ('orasentry-storage-'+[guid]::NewGuid()); "
+            "try { "
+            "$dbDir=Join-Path $testRoot 'db'; New-Item -ItemType Directory -Force -Path $dbDir|Out-Null; "
+            "$source=\"STORAGE_TYPE|STORAGE_PATH`r`n------------|------------`r`nDATAFILE|C:\\oradata\\system01.dbf`r`nASM|+DATA/ORCL/DATAFILE/system.1`r`n\"; "
+            "[IO.File]::WriteAllText((Join-Path $dbDir 'storage_paths.txt'),$source,(New-Object Text.UTF8Encoding($false))); "
+            "$ctx=[pscustomobject]@{RawDir=$testRoot;ManifestFile=(Join-Path $testRoot 'manifest.tsv');"
+            "LogFile=(Join-Path $testRoot 'collect.log');Failures=0;Warnings=0;OracleHome='C:\\Oracle'}; "
+            "Collect-WindowsStoragePathCapacity $ctx $dbDir; "
+            "$result=[IO.File]::ReadAllText((Join-Path $dbDir 'storage_path_capacity.txt')); "
+            "if($result-match'------------'-or$result-notmatch'DATAFILE\\|FILESYSTEM\\|C:'-or$result-notmatch'ASM\\|ASM\\|\\+DATA'){exit 2} "
+            "} finally { Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue }"
+        )
         result = subprocess.run(
             [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
             capture_output=True, text=True, encoding="utf-8", errors="replace",

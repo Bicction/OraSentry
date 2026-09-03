@@ -12,8 +12,16 @@ HOST_THRESHOLDS = {
     "disk_free_crit": 5,         # 磁盘可用空间严重(GB)
     "cpu_usage_warn": 80,        # CPU使用率警告(%)
     "cpu_usage_crit": 95,        # CPU使用率严重(%)
+    "cpu_privileged_warn": 50,   # Windows 特权CPU时间P95警告(%)
+    "cpu_privileged_crit": 80,   # Windows 特权CPU时间P95严重(%)
+    "cpu_queue_per_core_warn": 1.0,
+    "cpu_queue_per_core_crit": 2.0,
     "mem_usage_warn": 80,        # 内存使用率警告(%)
     "mem_usage_crit": 95,        # 内存使用率严重(%)
+    "mem_commit_warn": 85,
+    "mem_commit_crit": 95,
+    "pages_per_sec_warn": 100,
+    "pages_per_sec_crit": 500,
     "swap_usage_warn": 50,      # Swap占用率警告(%)，需结合实时换页活动判断
     "swap_usage_crit": 80,      # Swap占用率严重(%)
     "inode_usage_warn": 80,
@@ -26,6 +34,12 @@ HOST_THRESHOLDS = {
     "disk_await_crit_ms": 50,
     "disk_util_warn": 70,
     "disk_util_crit": 90,
+    "disk_queue_warn": 2,
+    "disk_queue_crit": 5,
+    "time_offset_warn_ms": 1000,
+    "time_offset_crit_ms": 5000,
+    "patch_age_warn_days": 90,
+    "patch_age_crit_days": 180,
 }
 
 # 数据库巡检阈值
@@ -48,6 +62,10 @@ DB_THRESHOLDS = {
     "dead_session_count_crit": 50,  # 僵死会话数量严重
     "alert_error_count_warn": 5,    # alert log错误数警告
     "alert_error_count_crit": 20,   # alert log错误数严重
+    "oracle_volume_usage_warn": 85,
+    "oracle_volume_usage_crit": 95,
+    "oracle_volume_free_warn_gb": 20,
+    "oracle_volume_free_crit_gb": 10,
     "resource_usage_warn": 80,
     "resource_usage_crit": 90,
     "blocking_session_warn": 1,
@@ -75,10 +93,15 @@ CHECK_SCORE_WEIGHTS = {
     "RAC服务": 5,
     "监听器与SQL*Net安全": 5,
     "Oracle服务": 5,
+    "Oracle进程健康": 5,
+    "Windows关键事件": 5,
+    "Oracle存储卷容量": 5,
 
     # 重要配置、容量、性能与安全基线
     "数据库补丁": 3,
     "Windows事件日志": 3,
+    "Oracle端口暴露": 3,
+    "Windows补丁与重启": 3,
     "页面文件使用率": 3,
     "数据库韧性配置": 3,
     "Redo Log": 3,

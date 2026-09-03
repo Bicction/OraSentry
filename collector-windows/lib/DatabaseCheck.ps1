@@ -58,8 +58,73 @@ function Get-DatabaseQueries {
         "failed_jobs.txt" = "SELECT job_name, status, run_duration, actual_start_date, error#, additional_info FROM dba_scheduler_job_run_details WHERE status='FAILED' AND actual_start_date>SYSDATE-7 ORDER BY actual_start_date DESC;"
         "dbms_jobs.txt" = "SELECT job, what, last_date, next_date, failures, broken FROM dba_jobs WHERE failures>0 OR broken='Y';"
         "trace_dir.txt" = "SELECT name, value FROM v`$diag_info WHERE name IN ('Diag Trace','Diag Alert','Default Trace File');"
+        "storage_paths.txt" = "SELECT storage_type, storage_path FROM (SELECT 'DATAFILE' storage_type, file_name storage_path FROM dba_data_files UNION ALL SELECT 'TEMPFILE', file_name FROM dba_temp_files UNION ALL SELECT 'REDO', member FROM v`$logfile UNION ALL SELECT 'CONTROL', name FROM v`$controlfile UNION ALL SELECT 'FRA', name FROM v`$recovery_file_dest WHERE name IS NOT NULL UNION ALL SELECT 'DIAG_TRACE', value FROM v`$diag_info WHERE name='Diag Trace' UNION ALL SELECT 'ARCHIVE_DEST', destination FROM v`$archive_dest WHERE status='VALID' AND destination IS NOT NULL) ORDER BY storage_type, storage_path;"
     }
     return $queries
+}
+
+function Collect-WindowsStoragePathCapacity {
+    param($Context, [string]$DbDir)
+    Invoke-CollectionAction $Context "storage_path_capacity.txt" {
+        $source = Join-Path $DbDir "storage_paths.txt"
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "storage_paths.txt 不存在" }
+        $entries = New-Object System.Collections.Generic.List[object]
+        foreach ($line in Get-Content -LiteralPath $source -ErrorAction Stop) {
+            $text = ([string]$line).Trim()
+            if (-not $text -or $text.StartsWith("-")) { continue }
+            $parts = @($text -split '\|', 2)
+            if ($parts.Count -lt 2 -or $parts[0].Trim().ToUpperInvariant() -eq "STORAGE_TYPE") { continue }
+            $storageType = $parts[0].Trim()
+            $path = $parts[1].Trim()
+            if ($storageType -and $path) { $entries.Add(@($storageType, $path)) }
+        }
+        if ($Context.OracleHome) { $entries.Add(@("ORACLE_HOME", [string]$Context.OracleHome)) }
+
+        $groups = @{}
+        foreach ($entry in $entries) {
+            $storageType = [string]$entry[0]
+            $path = [Environment]::ExpandEnvironmentVariables([string]$entry[1])
+            $kind = "OTHER"
+            $volume = ""
+            $totalGb = ""
+            $freeGb = ""
+            $usagePct = ""
+            if ($path.StartsWith("+")) {
+                $kind = "ASM"
+                $volume = ($path -split '[\\/]', 2)[0]
+            } elseif ($path -match '^\\\\') {
+                $kind = "UNC"
+                if ($path -match '^(\\\\[^\\]+\\[^\\]+)') { $volume = $matches[1] }
+            } elseif ([System.IO.Path]::IsPathRooted($path)) {
+                $kind = "FILESYSTEM"
+                $volume = ([System.IO.Path]::GetPathRoot($path)).TrimEnd('\')
+                if ($volume -match '^[A-Za-z]:$') {
+                    $disk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $volume.Replace("'", "''")) -ErrorAction SilentlyContinue
+                    if ($disk -and [double]$disk.Size -gt 0) {
+                        $totalGb = [Math]::Round([double]$disk.Size / 1GB, 2)
+                        $freeGb = [Math]::Round([double]$disk.FreeSpace / 1GB, 2)
+                        $usagePct = [Math]::Round((1 - [double]$disk.FreeSpace / [double]$disk.Size) * 100, 2)
+                    }
+                }
+            }
+            $key = "{0}|{1}|{2}" -f $storageType, $kind, $volume
+            if (-not $groups.ContainsKey($key)) {
+                $groups[$key] = [pscustomobject]@{
+                    Type=$storageType; Kind=$kind; Volume=$volume; Count=0; Example=$path
+                    TotalGb=$totalGb; FreeGb=$freeGb; UsagePct=$usagePct
+                }
+            }
+            $groups[$key].Count++
+        }
+        if ($groups.Count -eq 0) { throw "未识别到 Oracle 存储路径" }
+        $rows = foreach ($group in ($groups.Values | Sort-Object Type, Volume)) {
+            ,@($group.Type, $group.Kind, $group.Volume, $group.Count, $group.Example,
+                $group.TotalGb, $group.FreeGb, $group.UsagePct)
+        }
+        Write-PipeTable (Join-Path $DbDir "storage_path_capacity.txt") @(
+            "TYPE","STORAGE_KIND","VOLUME","PATH_COUNT","EXAMPLE_PATH","TOTAL_GB","FREE_GB","USAGE_PCT"
+        ) $rows
+    } -Optional
 }
 
 function Collect-WindowsAlertLog {
@@ -157,6 +222,7 @@ function Collect-WindowsDatabase {
     foreach ($entry in $queries.GetEnumerator()) {
         Invoke-RegisteredSql $Context $dbDir $entry.Key $entry.Value -Optional:($entry.Key -in @("asm_diskgroups.txt","asm_disks.txt"))
     }
+    Collect-WindowsStoragePathCapacity $Context $dbDir
 
     if ($isCdb -eq "YES") {
         Invoke-RegisteredSql $Context $dbDir "cdb_info.txt" "SELECT CDB FROM v`$database;"

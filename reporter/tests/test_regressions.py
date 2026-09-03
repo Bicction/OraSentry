@@ -95,10 +95,10 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(rows[1], ["1", "", "3"])
 
     def test_v43_reporter_and_windows_version_are_consistent(self):
-        self.assertEqual(APP_VERSION, "4.3.0")
+        self.assertEqual(APP_VERSION, "4.3.1")
         version_info = Path(ROOT, "tools", "version_info.txt").read_text(encoding="utf-8")
-        self.assertIn("filevers=(4, 3, 0, 0)", version_info)
-        self.assertIn("ProductVersion', '4.3.0.0'", version_info)
+        self.assertIn("filevers=(4, 3, 1, 0)", version_info)
+        self.assertIn("ProductVersion', '4.3.1.0'", version_info)
 
     def test_collection_integrity_detects_sqlplus_error(self):
         with tempfile.TemporaryDirectory() as td:

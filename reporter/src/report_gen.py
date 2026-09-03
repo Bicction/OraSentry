@@ -40,7 +40,7 @@ from scoring import (
 )
 
 
-APP_VERSION = "4.3.0"
+APP_VERSION = "4.3.1"
 SUPPORTED_SCHEMA_MAJOR = 4
 
 

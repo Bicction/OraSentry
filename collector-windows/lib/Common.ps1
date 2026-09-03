@@ -1,6 +1,6 @@
 ﻿Set-StrictMode -Version 2.0
 
-$script:CollectorVersion = "4.3.0"
+$script:CollectorVersion = "4.3.1"
 $script:SchemaVersion = "4.3"
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 

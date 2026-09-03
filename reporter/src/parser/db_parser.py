@@ -16,6 +16,7 @@ from parser.base import (
     generate_bar_chart,
     generate_data_table,
     generate_health_percentage,
+    parse_env_info,
 )
 from config import DB_THRESHOLDS
 
@@ -78,6 +79,8 @@ def parse_db(raw_dir: str) -> Dict[str, List[CheckResult]]:
     db_results.append(_parse_db_language(db_dir))
     db_results.append(_parse_backup_status(db_dir))
     db_results.append(_parse_archive_log(db_dir))
+    if str(parse_env_info(raw_dir).get("platform", "")).strip().lower() == "windows":
+        db_results.append(_parse_storage_path_capacity(db_dir))
     db_results.append(_parse_control_files(db_dir))
     db_results.append(_parse_redo_logs(db_dir))
     db_results.append(_parse_data_files(db_dir))
@@ -1026,6 +1029,62 @@ def _parse_archive_log(db_dir: str) -> CheckResult:
 
     return CheckResult("归档日志使用率", status, f"{usage:.1f}%",
                        f"归档日志目录使用率: {usage:.1f}%", suggestion)
+
+
+def _parse_storage_path_capacity(db_dir: str) -> CheckResult:
+    """解析 Windows 上 Oracle 数据文件、Redo、归档和诊断目录所在卷容量。"""
+    content = read_file(f"{db_dir}/storage_path_capacity.txt")
+    if not content:
+        return CheckResult("Oracle存储卷容量", "INFO", "旧版未采集", "采集包不含 Oracle 路径与 Windows 卷容量关联数据")
+    rows = _data_rows(content, ("TYPE",))
+    if not rows:
+        return CheckResult("Oracle存储卷容量", "INFO", "无可评估卷", "未识别到盘符文件系统；ASM和UNC容量应在对应存储平台核查")
+
+    status_order = {"OK": 0, "WARN": 1, "CRIT": 2}
+    overall = "OK"
+    local_rows = 0
+    usage_values = []
+    table_rows = []
+    for row in rows:
+        values = list(row) + [""] * max(0, 8 - len(row))
+        storage_type, kind, volume, path_count, example, total_text, free_text, usage_text = values[:8]
+        item_status = "INFO"
+        if kind.upper() == "FILESYSTEM" and total_text and free_text and usage_text:
+            local_rows += 1
+            try:
+                usage = float(usage_text)
+                free_gb = float(free_text)
+            except ValueError:
+                item_status = "UNKNOWN"
+            else:
+                usage_values.append(usage)
+                item_status = check_threshold(
+                    usage,
+                    DB_THRESHOLDS["oracle_volume_usage_warn"],
+                    DB_THRESHOLDS["oracle_volume_usage_crit"],
+                )
+                if free_gb <= DB_THRESHOLDS["oracle_volume_free_crit_gb"]:
+                    item_status = "CRIT"
+                elif free_gb <= DB_THRESHOLDS["oracle_volume_free_warn_gb"] and item_status == "OK":
+                    item_status = "WARN"
+            if item_status in status_order and status_order[item_status] > status_order[overall]:
+                overall = item_status
+        table_rows.append((storage_type, kind, volume, path_count, example, total_text, free_text, usage_text, item_status))
+
+    if local_rows == 0:
+        overall = "INFO"
+    worst_usage = max(usage_values, default=0.0)
+    suggestion = "请优先清理归档/诊断文件、迁移 Oracle 文件或扩容对应 Windows 卷" if overall in ("WARN", "CRIT") else ""
+    return CheckResult(
+        "Oracle存储卷容量", overall,
+        f"最高{worst_usage:.1f}%" if local_rows else "非盘符存储",
+        f"关联 {len(rows)} 组 Oracle 路径，其中 {local_rows} 组可读取 Windows 卷容量",
+        suggestion,
+        extra_html=generate_data_table(
+            ["类型", "存储", "卷", "路径数", "示例路径", "总容量(GB)", "可用(GB)", "使用率(%)", "状态"],
+            table_rows,
+        ),
+    )
 
 
 def _parse_control_files(db_dir: str) -> CheckResult:

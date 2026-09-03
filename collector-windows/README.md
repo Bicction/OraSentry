@@ -111,13 +111,19 @@ DB_INTERACTIVE_LOGIN = "on"
 
 - 固定卷容量和文件系统。
 - CPU、物理内存、页面文件和磁盘性能计数器。
+- CPU、内存、换页和物理磁盘的10秒持续采样，报告平均值、峰值与P95。
 - 交互登录会话和最近7天失败登录抽样。
 - Windows Defender 防火墙配置文件。
-- Windows Time 服务、时区和时间源。
+- Oracle TCP端点对应的 Windows Defender 防火墙入站规则和远程地址范围。
+- Windows Time 服务、时区、时间源和可获取时的实际时钟偏移。
 - TCP/UDP 监听端点和对应进程。
 - System/Application 错误及严重事件。
-- Oracle 服务、进程和启动状态。
+- 存储、文件系统、硬件、异常关机、资源耗尽、Oracle服务崩溃和审计清除关键事件分类。
+- Oracle 服务、恢复动作、进程资源和启动状态。
+- Windows版本、最近HotFix、补丁间隔和待重启状态。
 - Oracle Home、`oracle.exe`、网络配置及密码文件 NTFS ACL。
+
+数据库采集包还会把 Data File、Temp File、Redo、Control File、FRA、归档、Trace 和 Oracle Home 路径关联到 Windows 盘符容量；ASM和UNC路径保留清单，但容量由对应存储平台核查。
 
 Linux inode、sysctl、HugePages 和 THP 等检查在 Windows 报告中标记为不适用，不参与健康评分。
 
