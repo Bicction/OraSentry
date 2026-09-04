@@ -103,7 +103,9 @@ Windows 环境安装 Microsoft Word 时，报告器会在后台调用 Word 分�
 
 构建产物为 `dist/OracleReport.exe`。构建脚本会安装 `python-docx`、`lxml` 和 PyInstaller；最终用户不需要安装 Python 或 Office 组件即可生成 DOCX。
 
-构建同时生成 `OracleReport.exe.sha256`，EXE 内含 4.3.1.0 版本资源。正式分发前，建议使用组织的代码签名证书和 Windows SDK `signtool.exe` 执行 Authenticode 签名。
+构建同时生成 `OracleReport.exe.sha256`，EXE 内含 4.3.7.0 版本资源。正式分发前，建议使用组织的代码签名证书和 Windows SDK `signtool.exe` 执行 Authenticode 签名。
+
+Windows 第二期增量指标包括网络质量、终端防护、高权限组、系统审计、锁页与大页配置、Oracle 配置 ACL 和 Windows Failover Cluster。旧包缺少增量文件显示 INFO，已登记的执行失败或部分采集显示 UNKNOWN；已过滤且不影响SQL结果的环境提示保持 INFO。部分失败仍保留已观测到的风险，同时由采集完整性降低数据可信度。规则与适用边界见 [Windows 第二期说明](../doc/WINDOWS-PHASE2.md)。
 
 ## 测试
 

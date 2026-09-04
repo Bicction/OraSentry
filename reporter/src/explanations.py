@@ -61,6 +61,15 @@ CHECK_ITEM_EXPLANATIONS = {
     "Oracle端口暴露": "关联 Oracle TCP监听端点与 Windows 防火墙入站规则，重点关注对任意远程地址开放的数据库端口。",
     "Windows补丁与重启": "检查 Windows版本、最近HotFix、补丁间隔和待重启标记，重点关注长期未维护及未完成重启导致的风险。",
     "Linux内核参数": "说明 Linux 专属内核参数在 Windows 主机上的适用性；不适用项不参与健康评分。",
+    "Windows网络配置": "展示网卡状态与速率、IP、DNS和默认路由；只对默认路由关联的非Up接口提示风险，不主动探测DNS或业务网络。",
+    "Windows网络质量": "使用5秒计数器增量评估网卡错误/丢弃和TCP重传；低流量不据百分比告警，计数器重置或不可读标记为未知。",
+    "Windows终端防护": "核查Defender运行模式、实时防护和签名时效；第三方产品注册及Sense服务仅是线索，不等同于EDR健康证明。",
+    "Windows高权限组": "按SID核查本地Administrators及ORA_*_DBA/OPER成员，识别宽泛组授权；域嵌套和业务职责授权需人工核验。",
+    "Windows审计策略": "按固定GUID读取系统级高级审计，检查登录成功/失败和策略、用户、安全组变更审计；不替代完整合规评估。",
+    "Windows故障转移集群": "只读核查Windows集群节点、组、资源、网络、仲裁；未安装或未配置为INFO，查询失败为UNKNOWN，不执行切换。",
+    "Oracle锁页权限与大页配置": "核查Windows Oracle服务账号锁页授权和ORA_LPENABLE/实例覆盖值；配置不等于运行中令牌或实际大页使用。",
+    "Oracle Windows大页": "关联本地数据库实例、Windows服务及注册表大页配置；USE_LARGE_PAGES仅作参数参考，远程数据库不关联本地服务。",
+    "Oracle配置ACL": "检查Oracle网络配置及匹配Oracle Home注册表的潜在宽泛写权限；保存SID、ACL和文件时间。",
 }
 
 

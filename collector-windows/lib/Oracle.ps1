@@ -185,7 +185,10 @@ function Register-SqlPlusStartupWarnings {
     )
     $message = "SQL*Plus启动脚本的 SET ECHO 前含UTF-8 BOM，已忽略非致命SP2-0734；建议修复glogin.sql/login.sql编码"
     Write-CollectorLog -Context $Context -Level "WARN" -Message $message
-    Add-CollectionManifest -Context $Context -Item "sqlplus_startup_profile" -Type "ENV" -Status "WARN" -ExitCode 0 -Message $message
+    # The known BOM profile line is removed from SQL*Plus output before error
+    # evaluation, so retain it as diagnostic metadata without making the
+    # otherwise successful collection incomplete.
+    Add-CollectionManifest -Context $Context -Item "sqlplus_startup_profile" -Type "ENV" -Status "OK" -ExitCode 0 -Message $message
 }
 
 function Write-SqlPlusDiagnostic {

@@ -28,6 +28,7 @@ if ($LASTEXITCODE -ne 0) {
 $Spec = Join-Path $ProjectRoot "tools\oracle_report.spec"
 $Dist = Join-Path $ProjectRoot "dist"
 $Work = Join-Path $ProjectRoot "build"
+$StagedDist = Join-Path $Work ("dist-staging-" + [guid]::NewGuid().ToString("N"))
 
 # 将 Tcl/Tk 脚本暂存到项目构建目录。部分受限环境可以加载 _tkinter，
 # 但 Tcl 无法直接读取 Python 安装目录，PyInstaller 会静默排除 GUI。
@@ -69,20 +70,37 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "Building exe..."
-& $Python -m PyInstaller --noconfirm --clean --distpath $Dist --workpath $Work $Spec
-if ($LASTEXITCODE -ne 0) {
-    throw "PyInstaller failed."
-}
+try {
+    # PyInstaller --noconfirm clears its dist path. Use a dedicated staging
+    # directory so diagnostic packages placed in reporter/dist are preserved.
+    & $Python -m PyInstaller --noconfirm --clean --distpath $StagedDist --workpath $Work $Spec
+    if ($LASTEXITCODE -ne 0) {
+        throw "PyInstaller failed."
+    }
 
-$Exe = Join-Path $Dist "OracleReport.exe"
-if (-not (Test-Path $Exe)) {
-    throw "Output not found: $Exe"
-}
+    $BuiltExe = Join-Path $StagedDist "OracleReport.exe"
+    if (-not (Test-Path $BuiltExe)) {
+        throw "Output not found: $BuiltExe"
+    }
 
-$WarningFile = Join-Path $Work "oracle_report\warn-oracle_report.txt"
-if ((Test-Path $WarningFile) -and
-    (Select-String -LiteralPath $WarningFile -SimpleMatch "missing module named tkinter" -Quiet)) {
-    throw "PyInstaller excluded tkinter; the generated EXE is not a usable GUI build."
+    $WarningFile = Join-Path $Work "oracle_report\warn-oracle_report.txt"
+    if ((Test-Path $WarningFile) -and
+        (Select-String -LiteralPath $WarningFile -SimpleMatch "missing module named tkinter" -Quiet)) {
+        throw "PyInstaller excluded tkinter; the generated EXE is not a usable GUI build."
+    }
+
+    New-Item -ItemType Directory -Path $Dist -Force | Out-Null
+    $Exe = Join-Path $Dist "OracleReport.exe"
+    Copy-Item -LiteralPath $BuiltExe -Destination $Exe -Force
+} finally {
+    if (Test-Path -LiteralPath $StagedDist) {
+        $StagedFullPath = [IO.Path]::GetFullPath($StagedDist)
+        $WorkFullPath = [IO.Path]::GetFullPath($Work).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+        if (-not $StagedFullPath.StartsWith($WorkFullPath, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to clean staging path outside build directory: $StagedFullPath"
+        }
+        Remove-Item -LiteralPath $StagedFullPath -Recurse -Force
+    }
 }
 
 $HashFile = "${Exe}.sha256"

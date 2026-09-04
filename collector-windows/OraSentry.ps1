@@ -17,6 +17,8 @@ $collectorRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $collectorRoot "lib\Oracle.ps1")
 . (Join-Path $collectorRoot "lib\DatabaseCheck.ps1")
 . (Join-Path $collectorRoot "lib\SecurityCheck.ps1")
+. (Join-Path $collectorRoot "lib\WindowsBaseline.ps1")
+. (Join-Path $collectorRoot "lib\WindowsOracle.ps1")
 
 if (-not $ConfigFile) { $ConfigFile = Join-Path $collectorRoot "conf\check.psd1" }
 if (-not (Test-Path -LiteralPath $ConfigFile -PathType Leaf)) { throw "配置文件不存在: $ConfigFile" }
@@ -35,6 +37,8 @@ if ($doHost) {
     $hostContext = Initialize-Collection -CheckType host -Config $config
     try {
         Collect-WindowsHost $hostContext
+        Collect-WindowsBaseline $hostContext
+        Collect-OracleWindowsMemory $hostContext (Join-Path $hostContext.RawDir "host")
     } catch {
         Write-CollectorErrorRecord -Context $hostContext -ErrorRecord $_
         Add-CollectionManifest $hostContext "host_collection" "COLLECTOR" "FAILED" 1 $_.Exception.Message

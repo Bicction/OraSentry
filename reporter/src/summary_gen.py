@@ -706,7 +706,7 @@ def _matrix_html(model: SummaryModel) -> str:
         + """
         <p class="muted-note">下表按生成顺序列出本期纳入汇总的全部巡检报告，点击主机名可跳转到该系统摘要。</p>
         <div class="table-wrap">
-            <table class="check-table">
+            <table class="check-table fleet-matrix-table">
                 <thead>
                     <tr>
                         <th>序号</th><th>主机</th><th>地址</th><th>SID</th>
@@ -719,7 +719,7 @@ def _matrix_html(model: SummaryModel) -> str:
         </div>
         <p class="muted-note">按巡检类别汇总（跨系统合计）：</p>
         <div class="table-wrap">
-            <table class="check-table">
+            <table class="check-table category-matrix-table">
                 <thead>
                     <tr>
                         <th>类别</th><th class="center">检查项</th><th class="center">正常</th>

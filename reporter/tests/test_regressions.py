@@ -95,10 +95,16 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(rows[1], ["1", "", "3"])
 
     def test_v43_reporter_and_windows_version_are_consistent(self):
-        self.assertEqual(APP_VERSION, "4.3.1")
+        self.assertEqual(APP_VERSION, "4.3.7")
         version_info = Path(ROOT, "tools", "version_info.txt").read_text(encoding="utf-8")
-        self.assertIn("filevers=(4, 3, 1, 0)", version_info)
-        self.assertIn("ProductVersion', '4.3.1.0'", version_info)
+        self.assertIn("filevers=(4, 3, 7, 0)", version_info)
+        self.assertIn("ProductVersion', '4.3.7.0'", version_info)
+
+    def test_windows_build_stages_exe_without_cleaning_distribution(self):
+        script = Path(ROOT, "tools", "build_windows.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("--distpath $StagedDist", script)
+        self.assertNotIn("--distpath $Dist", script)
+        self.assertIn("Copy-Item -LiteralPath $BuiltExe -Destination $Exe -Force", script)
 
     def test_collection_integrity_detects_sqlplus_error(self):
         with tempfile.TemporaryDirectory() as td:
@@ -117,6 +123,23 @@ class RegressionTests(unittest.TestCase):
             result = parse_collection_integrity(td)
             self.assertEqual(result.status, "INFO")
             self.assertIn("1项不适用", result.value)
+
+    def test_collection_integrity_treats_known_nonfatal_warnings_as_advisory(self):
+        with tempfile.TemporaryDirectory() as td:
+            Path(td, "env.info").write_text(
+                "platform=windows\ncheck_type=db\ncollector_version=4.3.3\n",
+                encoding="utf-8",
+            )
+            Path(td, "collection_manifest.tsv").write_text(
+                "item\ttype\tstatus\texit_code\tmessage\n"
+                "sqlplus_startup_profile\tENV\tWARN\t0\tSET ECHO前含UTF-8 BOM，已忽略\n"
+                "oracle_config_acl.txt\tCOMMAND\tWARN\t1\tYou cannot call a method on a null-valued expression.\n",
+                encoding="utf-8",
+            )
+            result = parse_collection_integrity(td, scopes=("db", "security"))
+            self.assertEqual(result.status, "INFO")
+            self.assertEqual(result.value, "完整（1项提示）")
+            self.assertNotIn("命令/SQL 错误", result.detail)
 
     def test_collection_integrity_deduplicates_manifest_and_file_error(self):
         with tempfile.TemporaryDirectory() as td:
@@ -752,6 +775,39 @@ class RegressionTests(unittest.TestCase):
         table = generate_data_table(["<列>"], [["<script>alert(1)</script>"]])
         self.assertNotIn("<script>", table)
         self.assertIn("&lt;script&gt;", table)
+
+    def test_html_tables_are_contained_for_long_text_and_many_columns(self):
+        long_value = "C:\\" + "very_long_unbroken_path_" * 20
+        compact = generate_data_table(["路径", "说明"], [[long_value, long_value]])
+        wide = generate_data_table([f"列{i}" for i in range(7)], [[long_value] * 7])
+        very_wide = generate_data_table([f"列{i}" for i in range(10)], [[long_value] * 10])
+        self.assertIn('<div class="data-table-wrap">', compact)
+        self.assertIn('class="data-table data-table-wide"', wide)
+        self.assertIn('class="data-table data-table-very-wide"', very_wide)
+        self.assertIn('aria-label="可横向滚动的巡检明细表"', very_wide)
+        self.assertEqual(parse_extra_html(very_wide)[0][0], "table")
+
+        section = generate_category_section(
+            "db", [CheckResult("长名称", "INFO", long_value, long_value, extra_html=very_wide)]
+        )
+        self.assertIn('class="check-table report-detail-table"', section)
+        self.assertIn('<col class="check-col-detail">', section)
+
+        template = Path(template_path()).read_text(encoding="utf-8")
+        table_wrap_css = re.search(r"\.table-wrap\s*\{([^}]+)\}", template, re.S).group(1)
+        data_cell_css = re.search(r"\.data-table td\s*\{([^}]+)\}", template, re.S).group(1)
+        self.assertIn("overflow-x: auto", table_wrap_css)
+        self.assertIn("max-width: 100%", table_wrap_css)
+        self.assertIn("overflow-wrap: anywhere", data_cell_css)
+        self.assertIn("word-break: break-word", data_cell_css)
+        self.assertIn(".data-table-wrap", template)
+        self.assertIn(".fleet-matrix-table { min-width: 1080px; }", template)
+        self.assertIn(".category-matrix-table { min-width: 720px; }", template)
+        self.assertIn("word-break: break-all", template)
+
+        summary_source = Path(ROOT, "src", "summary_gen.py").read_text(encoding="utf-8")
+        self.assertIn('class="check-table fleet-matrix-table"', summary_source)
+        self.assertIn('class="check-table category-matrix-table"', summary_source)
 
     def test_tar_path_traversal_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:

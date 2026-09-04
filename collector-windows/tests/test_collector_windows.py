@@ -164,6 +164,8 @@ class WindowsCollectorTests(unittest.TestCase):
     @unittest.skipUnless(POWERSHELL, "Windows PowerShell is not available")
     def test_sqlplus_error_summary_uses_actual_error_lines(self):
         oracle = str(ROOT / "lib" / "Oracle.ps1").replace("'", "''")
+        source = (ROOT / "lib" / "Oracle.ps1").read_text(encoding="utf-8-sig")
+        self.assertRegex(source, r'Item "sqlplus_startup_profile"[^\r\n]+Status "OK"')
         command = (
             f". '{oracle}'; "
             "$output=\"SP2-0734: unknown command`r`nVERSION`r`n-----------------`r`n19.0.0.0.0`r`n\"; "

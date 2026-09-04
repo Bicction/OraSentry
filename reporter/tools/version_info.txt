@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(4, 3, 1, 0),
-    prodvers=(4, 3, 1, 0),
+    filevers=(4, 3, 7, 0),
+    prodvers=(4, 3, 7, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -16,11 +16,11 @@ VSVersionInfo(
         [
           StringStruct('CompanyName', 'Dotease Limited'),
           StringStruct('FileDescription', 'Oracle Inspection Report Generator'),
-          StringStruct('FileVersion', '4.3.1.0'),
+          StringStruct('FileVersion', '4.3.7.0'),
           StringStruct('InternalName', 'OracleReport'),
           StringStruct('OriginalFilename', 'OracleReport.exe'),
           StringStruct('ProductName', 'Oracle Inspector'),
-          StringStruct('ProductVersion', '4.3.1.0'),
+          StringStruct('ProductVersion', '4.3.7.0'),
         ],
       )
     ]),

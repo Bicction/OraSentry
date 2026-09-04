@@ -72,10 +72,30 @@ def parse_env_info(raw_dir: str) -> dict:
     return env
 
 
+def manifest_warning_is_nonblocking(row: dict, env_info=None) -> bool:
+    """Recognize legacy/advisory warnings that did not invalidate collected data."""
+    if row.get("status") != "WARN":
+        return False
+    item = row.get("item", "")
+    kind = row.get("type", "")
+    exit_code = str(row.get("exit_code", "")).strip()
+    message = row.get("message", "").lower()
+    if item == "sqlplus_startup_profile" and kind == "ENV" and exit_code in ("", "0"):
+        return True
+    version = (env_info or {}).get("collector_version", "")
+    legacy_acl_versions = {"4.3.2", "4.3.3"}
+    null_expression = "null-valued expression" in message or "null 值表达式" in message
+    return item == "oracle_config_acl.txt" and version in legacy_acl_versions and null_expression
+
+
 def parse_collection_integrity(raw_dir: str, scopes=None) -> CheckResult:
     """把指定数据域的采集失败显式呈现在报告中，杜绝“失败即正常”。"""
     failed = []
+    incomplete = []
+    advisories = []
     skipped = []
+    env_info = parse_env_info(raw_dir)
+    package_type = env_info.get("check_type", "").lower()
     scope_dirs = [
         os.path.join(raw_dir, scope)
         for scope in (scopes or ())
@@ -86,6 +106,10 @@ def parse_collection_integrity(raw_dir: str, scopes=None) -> CheckResult:
         if not scopes:
             return True
         name = os.path.basename(str(item or ""))
+        if package_type == "host" and "host" in scopes:
+            return True
+        if package_type == "db" and any(scope in scopes for scope in ("db", "security")):
+            return True
         return any(os.path.isfile(os.path.join(directory, name)) for directory in scope_dirs)
 
     manifest = f"{raw_dir}/collection_manifest.tsv"
@@ -93,9 +117,16 @@ def parse_collection_integrity(raw_dir: str, scopes=None) -> CheckResult:
         try:
             with open(manifest, "r", encoding="utf-8", errors="replace", newline="") as f:
                 for row in csv.DictReader(f, delimiter="\t"):
-                    if row.get("status") == "FAILED" and in_scope(row.get("item", "")):
+                    if not in_scope(row.get("item", "")):
+                        continue
+                    if manifest_warning_is_nonblocking(row, env_info):
+                        if row.get("item") == "sqlplus_startup_profile":
+                            advisories.append((row.get("item", "未知"), row.get("message", "")[:160]))
+                    elif row.get("status") == "FAILED":
                         failed.append((row.get("item", "未知"), row.get("type", ""), row.get("message", "")[:160]))
-                    elif row.get("status") == "SKIPPED" and in_scope(row.get("item", "")):
+                    elif row.get("status") == "WARN":
+                        incomplete.append((row.get("item", "未知"), row.get("type", ""), row.get("message", "")[:160]))
+                    elif row.get("status") == "SKIPPED":
                         skipped.append((row.get("item", "未知"), row.get("message", "")[:160]))
         except (OSError, csv.Error) as exc:
             failed.append(("collection_manifest.tsv", "MANIFEST", str(exc)))
@@ -113,6 +144,7 @@ def parse_collection_integrity(raw_dir: str, scopes=None) -> CheckResult:
         "alert_log_errors.txt",
         "listener_status.txt",
         "listener_services.txt",
+        "sqlplus_startup_warning.log",
     }
     err_re = re.compile(r"^(?:ORA|SP2|TNS|LRM)-\d+", re.MULTILINE)
     scan_roots = scope_dirs if scopes else [raw_dir]
@@ -134,24 +166,49 @@ def parse_collection_integrity(raw_dir: str, scopes=None) -> CheckResult:
                     rel = os.path.relpath(path, raw_dir)
                     sql_errors.append((rel, "SQLPLUS", match.group(0)))
 
-    failed_names = {os.path.basename(f[0]) for f in failed}
-    problems = failed + [x for x in sql_errors if os.path.basename(x[0]) not in failed_names]
-    if problems:
-        rows = [(item, kind, message) for item, kind, message in problems[:100]]
+    manifest_problem_names = {os.path.basename(entry[0]) for entry in failed + incomplete}
+    detected_sql_failures = [entry for entry in sql_errors if os.path.basename(entry[0]) not in manifest_problem_names]
+    if failed or incomplete or detected_sql_failures:
+        failure_rows = [(item, "失败", kind, message) for item, kind, message in failed]
+        failure_rows += [(item, "失败", kind, message) for item, kind, message in detected_sql_failures]
+        incomplete_rows = [(item, "部分采集", kind, message) for item, kind, message in incomplete]
+        failure_count = len(failure_rows)
+        incomplete_count = len(incomplete_rows)
+        summary = []
+        if failure_count:
+            summary.append(f"{failure_count}项失败")
+        if incomplete_count:
+            summary.append(f"{incomplete_count}项不完整")
+        detail_parts = []
+        if failure_count:
+            detail_parts.append(f"{failure_count} 个采集命令或SQL执行失败")
+        if incomplete_count:
+            detail_parts.append(f"{incomplete_count} 个采集项仅获得部分数据")
         return CheckResult(
-            "采集完整性", "UNKNOWN", f"{len(problems)}项失败",
-            f"采集包中发现 {len(problems)} 个命令/SQL 错误，相关指标不可判定为正常",
-            "先修复采集错误并重新执行巡检，再依据报告作运维决策",
-            extra_html=generate_data_table(["项目", "类型", "错误"], rows),
+            "采集完整性", "UNKNOWN", "/".join(summary),
+            "采集包中发现" + "、".join(detail_parts) + "；仅表中所列相关指标不能判定为正常，其他成功采集的指标仍然有效",
+            "修复表中所列采集问题并重新执行巡检，再判断受影响的指标",
+            extra_html=generate_data_table(["项目", "结果", "类型", "原因"], (failure_rows + incomplete_rows)[:100]),
         )
     if not os.path.isfile(manifest):
         return CheckResult("采集完整性", "UNKNOWN", "旧版采集包", "未发现错误文本，但采集包不含执行清单，无法证明所有检查均成功",
                            "建议使用当前版本重新采集")
-    if skipped:
+    if skipped or advisories:
+        value_parts = []
+        detail_parts = ["所有适用的采集项均执行成功"]
+        table_rows = []
+        if skipped:
+            value_parts.append(f"{len(skipped)}项不适用")
+            detail_parts.append(f"{len(skipped)} 项因数据库版本、架构或配置不适用而跳过")
+            table_rows.extend(("不适用", item, message) for item, message in skipped)
+        if advisories:
+            value_parts.append(f"{len(advisories)}项提示")
+            detail_parts.append(f"{len(advisories)} 项环境提示不影响已采集数据的完整性")
+            table_rows.extend(("提示", item, message) for item, message in advisories)
         return CheckResult(
-            "采集完整性", "INFO", f"完整（{len(skipped)}项不适用）",
-            f"所有适用的采集项均执行成功；{len(skipped)} 项因数据库版本或架构不适用而跳过",
-            extra_html=generate_data_table(["项目", "跳过原因"], skipped),
+            "采集完整性", "INFO", "完整（" + "/".join(value_parts) + "）",
+            "；".join(detail_parts),
+            extra_html=generate_data_table(["分类", "项目", "说明"], table_rows),
         )
     return CheckResult("采集完整性", "INFO", "完整", "所有已登记采集项均执行成功，未发现 SQL*Plus 错误")
 
@@ -221,6 +278,10 @@ def generate_data_table(headers: list, rows: list, *, row_classes=None,
     cell_classes: {(行号, 列号): CSS类名}，行列号从0开始
     """
     th_html = "".join(f"<th>{html.escape(str(h))}</th>" for h in headers)
+    column_count = len(headers)
+    width_class = " data-table-very-wide" if column_count >= 9 else " data-table-wide" if column_count >= 7 else ""
+    scroll_attrs = (' tabindex="0" role="region" aria-label="可横向滚动的巡检明细表"'
+                    if width_class else "")
     tr_html = ""
     row_classes = row_classes or {}
     cell_classes = cell_classes or {}
@@ -236,7 +297,9 @@ def generate_data_table(headers: list, rows: list, *, row_classes=None,
             cells.append(f"<td{cell_attr}>{html.escape(str(cell))}</td>")
         tr_html += f"<tr{row_attr}>{''.join(cells)}</tr>"
 
-    return f"""<table class="data-table">
-        <thead><tr>{th_html}</tr></thead>
-        <tbody>{tr_html}</tbody>
-    </table>"""
+    return f"""<div class="data-table-wrap"{scroll_attrs}>
+        <table class="data-table{width_class}">
+            <thead><tr>{th_html}</tr></thead>
+            <tbody>{tr_html}</tbody>
+        </table>
+    </div>"""

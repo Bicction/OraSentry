@@ -40,7 +40,7 @@ from scoring import (
 )
 
 
-APP_VERSION = "4.3.1"
+APP_VERSION = "4.3.7"
 SUPPORTED_SCHEMA_MAJOR = 4
 
 
@@ -602,7 +602,13 @@ def _generate_table_wrap(category: str, items: List[CheckResult], style_class: s
 
     return f"""
     <div class="table-wrap {style_class}">
-        <table class="check-table">
+        <table class="check-table report-detail-table">
+            <colgroup>
+                <col class="check-col-name">
+                <col class="check-col-status">
+                <col class="check-col-value">
+                <col class="check-col-detail">
+            </colgroup>
             <thead>
                 <tr>
                     <th>巡检项</th>

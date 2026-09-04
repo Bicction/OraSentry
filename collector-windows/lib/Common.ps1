@@ -1,6 +1,6 @@
 ﻿Set-StrictMode -Version 2.0
 
-$script:CollectorVersion = "4.3.1"
+$script:CollectorVersion = "4.3.7"
 $script:SchemaVersion = "4.3"
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
@@ -271,6 +271,10 @@ function Complete-Collection {
     )
     if ($Context.Failures -gt 0) {
         Write-CollectorLog -Context $Context -Level "ERROR" -Message "采集存在 $($Context.Failures) 个失败项，详见 collection_manifest.tsv"
+        return $false
+    }
+    if ($Context.Warnings -gt 0) {
+        Write-CollectorLog -Context $Context -Level "WARN" -Message "采集存在 $($Context.Warnings) 个不可用或部分失败项，采集包仍将生成，详见 collection_manifest.tsv"
         return $false
     }
     Write-CollectorLog -Context $Context -Message "采集完整性校验通过"

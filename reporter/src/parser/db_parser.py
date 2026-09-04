@@ -81,6 +81,8 @@ def parse_db(raw_dir: str) -> Dict[str, List[CheckResult]]:
     db_results.append(_parse_archive_log(db_dir))
     if str(parse_env_info(raw_dir).get("platform", "")).strip().lower() == "windows":
         db_results.append(_parse_storage_path_capacity(db_dir))
+        from parser.windows_baseline_parser import parse_windows_large_pages
+        db_results.append(parse_windows_large_pages(raw_dir))
     db_results.append(_parse_control_files(db_dir))
     db_results.append(_parse_redo_logs(db_dir))
     db_results.append(_parse_data_files(db_dir))

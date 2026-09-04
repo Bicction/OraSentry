@@ -74,4 +74,5 @@ function Collect-WindowsSecurity {
     }
 
     Write-CollectorLog -Context $Context -Message "Oracle 与 Windows 安全数据采集完成"
+    Collect-OracleConfigurationAcls $Context $secDir
 }

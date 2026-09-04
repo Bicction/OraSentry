@@ -90,6 +90,8 @@ def parse_windows_host(raw_dir: str) -> List[CheckResult]:
     results.append(_parse_oracle_services(host_dir))
     results.append(_parse_oracle_processes(host_dir))
     results.append(_parse_windows_maintenance(host_dir))
+    from parser.windows_baseline_parser import parse_windows_baseline
+    results.extend(parse_windows_baseline(raw_dir))
     return results
 
 

@@ -223,6 +223,8 @@ function Collect-WindowsDatabase {
         Invoke-RegisteredSql $Context $dbDir $entry.Key $entry.Value -Optional:($entry.Key -in @("asm_diskgroups.txt","asm_disks.txt"))
     }
     Collect-WindowsStoragePathCapacity $Context $dbDir
+    Invoke-RegisteredSql $Context $dbDir "windows_large_pages.txt" "SELECT i.instance_name, i.host_name, p.name, p.value FROM v`$instance i CROSS JOIN v`$parameter p WHERE p.name IN ('use_large_pages','lock_sga','sga_target','sga_max_size','memory_target','memory_max_target') ORDER BY p.name;" -Optional
+    Collect-OracleWindowsMemory $Context $dbDir
 
     if ($isCdb -eq "YES") {
         Invoke-RegisteredSql $Context $dbDir "cdb_info.txt" "SELECT CDB FROM v`$database;"

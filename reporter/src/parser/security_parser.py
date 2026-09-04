@@ -21,6 +21,8 @@ def parse_security(raw_dir: str) -> List[CheckResult]:
     if platform == "windows":
         from parser.windows_security_parser import parse_windows_os_security
         results.append(parse_windows_os_security(sec_dir))
+        from parser.windows_baseline_parser import parse_configuration_acl
+        results.append(parse_configuration_acl(sec_dir))
     else:
         results.append(_parse_os_security(sec_dir))
     results.append(_parse_listener_security(sec_dir))

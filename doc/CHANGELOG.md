@@ -2,6 +2,20 @@
 
 ## 未发布
 
+- 4.3.7：移除Windows远程访问基线巡检，不再采集或报告RDP/NLA、SMBv1配置；兼容旧采集包并忽略其中的remote_access.txt。
+- 4.3.6：统一修复HTML巡检总表、明细表和汇总表的边界溢出；长路径、对象名和SQL文本自动换行，7列以上明细在所属单元格内滚动，窄屏与打印版使用独立约束。
+- 4.3.5：修正采集完整性文案和分级，区分执行失败与部分采集；SQL*Plus启动脚本BOM提示不再误判整包不完整，并兼容4.3.2/4.3.3已移除ACL逻辑产生的已知空值警告。
+- 4.3.4：移除Oracle Wallet ACL采集与报告判定；保留Listener/SQLNet/TNS候选配置及匹配Oracle Home注册表ACL，并忽略旧包中的Wallet ACL记录。报告构建改用隔离暂存目录，避免清理`reporter/dist`中的诊断采集包。
+- 4.3.3：兼容部分 Windows Server 2016 `Get-NetRoute` 对象缺少 `State` 属性，避免 `network_config.txt` 采集失败。
+
+### Windows 第二期（4.3.2）
+
+- 新增只读网络配置/计数器增量、Defender/EDR观测、高权限组SID、高级审计与Windows Failover Cluster采集及报告。
+- 新增Oracle服务账号锁页权限证据、ORA_LPENABLE/实例覆盖配置、数据库内存参数和本地主机身份关联；不将Linux USE_LARGE_PAGES误当作Windows生效证明。
+- 新增Listener/SQLNet/TNS配置及Oracle Home注册表ACL元数据检查，不访问UNC路径。
+- 新增第二期可选文件兼容及失败判定；修正可选项WARN仍报告完整的问题，返回非零并继续生成采集包。
+- Windows Collector和报告程序升为4.3.2，EXE版本4.3.2.0，schema仍为4.3，继续兼容4.x采集包。
+
 ### 采集与认证
 
 - Windows Collector 新增 `开始巡检.cmd` 双击入口，自动申请管理员权限、读取统一配置并在结束时显示采集包路径；命令行入口保持兼容。
