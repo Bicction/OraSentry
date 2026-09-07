@@ -270,35 +270,6 @@ def parse_windows_large_pages(raw_dir):
     return CheckResult(name, status, memory.value, detail + "；" + memory.detail, memory.suggestion, extra_html=memory.extra_html)
 
 
-def parse_configuration_acl(directory):
-    name = "Oracle配置ACL"
-    rows, missing, problem = _load(directory, "oracle_config_acl.txt", name,
-                                   ("KIND", "PATH", "IDENTITY", "IDENTITY_SID", "RIGHTS", "TYPE", "EVIDENCE"))
-    if missing:
-        return missing
-    # 4.3.3 and earlier packages may contain Wallet ACL rows. They are outside
-    # the current inspection scope and must not affect display or scoring.
-    rows = [row for row in rows if row["KIND"] != "WALLET"]
-    if not rows:
-        return CheckResult(name, "UNKNOWN" if problem else "INFO", "无适用记录",
-                           "未发现适用的Listener/SQLNet/TNS候选配置或匹配Oracle Home注册表ACL记录"
-                           + ("；部分采集失败，结论不完整" if problem else ""))
-    risky = []
-    for row in rows:
-        rights = row["RIGHTS"].lower()
-        if row["TYPE"].lower() == "allow" and _broad_sid(row["IDENTITY_SID"]):
-            writable = any(r in rights for r in ("write", "modify", "fullcontrol", "setvalue", "createsubkey", "changepermissions", "takeownership", "delete"))
-            if writable:
-                risky.append(row)
-    unknown = any(r["EVIDENCE"] == "UNRESOLVED_PATH" or (r["EVIDENCE"] == "OBSERVED" and not r["IDENTITY_SID"]) for r in rows)
-    observed = [r for r in rows if r["EVIDENCE"] == "OBSERVED"]
-    return _result(name, "WARN" if risky else "INFO", f"{len(risky)}项潜在宽泛权限",
-                   "检查Listener/SQLNet/TNS候选配置及匹配Oracle Home注册表ACL；按SID识别宽泛写权限；Deny/嵌套组的有效访问需复核",
-                   ["类型", "路径", "主体", "SID", "权限", "Allow/Deny", "修改时间UTC", "证据"],
-                   [(r["KIND"], r["PATH"], r["IDENTITY"], r["IDENTITY_SID"], r["RIGHTS"], r["TYPE"], r.get("MODIFIED_UTC"), r["EVIDENCE"]) for r in rows],
-                   problem or unknown or not observed, "核验有效ACL并收紧配置写权限；不自动修改授权" if risky else "")
-
-
 def parse_windows_baseline(raw_dir):
     directory = os.path.join(raw_dir, "host")
     return [parser(directory) for parser in (

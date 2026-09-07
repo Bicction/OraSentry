@@ -134,7 +134,7 @@ Linux inode、sysctl、HugePages 和 THP 等检查在 Windows 报告中标记为
 - 本地管理员及ORA_*_DBA/OPER组直接成员和SID；Oracle服务账号的直接/已枚举本地组锁页授权证据。
 - 系统级高级审计策略。
 - Oracle注册表大页模式、数据库内存参数，区分本地和远程数据库。配置不代表实际大页使用。
-- Listener/SQLNet/TNS候选配置和匹配Oracle Home注册表ACL；不主动连接UNC路径。
+- 已移除独立的 Oracle 配置 ACL 巡检项，不再生成 oracle_config_acl.txt。
 - Windows Failover Cluster节点、组、资源、网络和仲裁。未安装/未配置不会告警，不执行切换或更改配置。
 
 建议使用管理员身份采集审计策略及用户权限。审计读取仅临时启用当前进程已持有的查询特权并恢复，不向账号授予权限。所有新增项目为可选增量，失败会记录到manifest、使返回码非零，并继续打包。详见 [字段、规则与适用边界](../doc/WINDOWS-PHASE2.md)。

@@ -28,6 +28,13 @@ class WindowsCollectorTests(unittest.TestCase):
         for path in list(ROOT.rglob("*.ps1")) + list(ROOT.rglob("*.psd1")):
             self.assertTrue(path.read_bytes().startswith(b"\xef\xbb\xbf"), path)
 
+    def test_security_queries_exclude_oracle_maintained_principals(self):
+        security = (ROOT / "lib" / "SecurityCheck.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("dba_roles WHERE oracle_maintained='N'", security)
+        self.assertIn("u.oracle_maintained='Y'", security)
+        self.assertIn("p.owner NOT IN", security)
+        self.assertIn("$oracleMaintainedExpr", security)
+
     def test_config_never_contains_plaintext_password_field(self):
         config = (ROOT / "conf" / "check.psd1").read_text(encoding="utf-8-sig")
         self.assertNotRegex(config, r"(?im)^\s*(DB_)?PASS(WORD)?\s*=")

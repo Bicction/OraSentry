@@ -71,6 +71,12 @@ class CollectorTests(unittest.TestCase):
         self.assertNotIn("FETCH FIRST", db_script.upper())
         self.assertIn("WHERE ROWNUM <= 20", db_script.upper())
 
+    def test_security_queries_exclude_oracle_maintained_principals(self):
+        security = (ROOT / "lib" / "security_check.sh").read_text(encoding="utf-8")
+        self.assertIn("dba_roles WHERE oracle_maintained='N'", security)
+        self.assertIn("u.oracle_maintained='Y'", security)
+        self.assertIn("p.owner NOT IN", security)
+
     def test_database_archive_name_includes_sid_before_timestamp(self):
         main_script = (ROOT / "main_db.sh").read_text(encoding="utf-8")
         self.assertIn(

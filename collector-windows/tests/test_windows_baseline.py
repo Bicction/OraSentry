@@ -50,22 +50,15 @@ class WindowsBaselineCollectorTests(unittest.TestCase):
         self.assertNotRegex(baseline + oracle, r"(?i)\b(?:Set-MpPreference|Set-SmbServerConfiguration|Set-ItemProperty|Move-ClusterGroup|Start-Cluster|Stop-Cluster|AuditSetSystemPolicy)\b")
         self.assertIn("/export /mergedpolicy /areas USER_RIGHTS", oracle)
         self.assertNotIn("Copy-Item", oracle)
+        security = (ROOT / "lib/SecurityCheck.ps1").read_text(encoding="utf-8-sig")
+        self.assertNotIn("Collect-OracleConfigurationAcls", security + oracle)
+        self.assertNotIn("oracle_config_acl.txt", security + oracle)
         self.assertNotIn("Get-OracleWalletDirectories", oracle)
         self.assertNotIn("wallet_root", oracle.lower())
         self.assertNotIn("cwallet.sso", oracle.lower())
         self.assertNotIn('"WALLET"', oracle)
         self.assertNotIn("Collect-WindowsRemoteAccess", baseline)
         self.assertNotIn("remote_access.txt", baseline)
-
-    def test_configuration_acl_exports_sid_and_metadata_only(self):
-        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
-            sample = Path(tmp) / "sqlnet-fixture.ora"
-            sample.write_text("NEVER_EXPORT_CONFIGURATION_CONTENT", encoding="utf-8")
-            escaped = str(sample).replace("'", "''")
-            self.run_ps(f"$rows=New-Object System.Collections.Generic.List[object]; Add-OracleConfigurationAclRows '{escaped}' 'NETWORK_FILE' $rows; "
-                        "if($rows.Count -eq 0){throw 'empty ACL'}; "
-                        "if(($rows | Out-String) -match 'NEVER_EXPORT_CONFIGURATION_CONTENT'){throw 'content leak'}; "
-                        "if(-not $rows[0][4]){throw 'no SID'}")
 
     def context_script(self, tmp):
         escaped = str(tmp).replace("'", "''")
@@ -99,13 +92,6 @@ class WindowsBaselineCollectorTests(unittest.TestCase):
                         "if($ctx.Warnings -ne 1){throw 'missing manifest failure'}; "
                         "$content=[IO.File]::ReadAllText((Join-Path $raw 'host\\windows_cluster.txt')); "
                         "if($content -notmatch 'NODE\\|NODE1\\|Down'){throw 'lost observed node'}")
-
-    def test_unc_and_unresolved_config_paths_are_not_accessed(self):
-        self.run_ps("function Test-Path { throw 'unexpected network access' }; "
-                    "$rows=New-Object System.Collections.Generic.List[object]; "
-                    "Add-OracleConfigurationAclRows '\\\\server\\network\\admin' 'NETWORK_FILE' $rows; "
-                    "Add-OracleConfigurationAclRows '%ORACLE_HOME%\\network\\admin' 'NETWORK_FILE' $rows; "
-                    "if($rows.Count -ne 2 -or $rows[0][9] -ne 'UNRESOLVED_PATH'){throw 'not marked unknown'}")
 
     def test_network_config_multivalue_fields_remain_separate_columns(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as tmp:

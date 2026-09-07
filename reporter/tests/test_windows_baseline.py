@@ -17,7 +17,6 @@ from report_gen import build_report
 NETWORK = "KIND|NAME|SECONDS|PACKETS|ERRORS|DISCARDS|RX_BYTES|TX_BYTES|TCP_SENT|TCP_RETRANS|COUNTER_STATE\n"
 PROTECTION = "KIND|PRODUCT|MODE|SERVICE_ENABLED|ANTIVIRUS_ENABLED|REALTIME_ENABLED|SIGNATURE_VERSION|SIGNATURE_UPDATED|SIGNATURE_AGE_DAYS|EVIDENCE\n"
 MEMORY = "SERVICE|SID|ACCOUNT|ACCOUNT_SID|ORACLE_HOME|REGISTRY_KEY|ORA_LPENABLE|ORA_SID_LPENABLE|LOCK_PAGES_GRANT|EVIDENCE|GRANTED_SIDS\n"
-ACL = "KIND|PATH|OWNER|IDENTITY|IDENTITY_SID|RIGHTS|TYPE|INHERITED|MODIFIED_UTC|EVIDENCE\n"
 AUDIT = "SUBCATEGORY|GUID|SUCCESS|FAILURE|FLAGS\n"
 CLUSTER = "KIND|NAME|STATE|OWNER|DETAIL\n"
 
@@ -66,13 +65,6 @@ class WindowsBaselineTests(unittest.TestCase):
         self.assertEqual(result.value, "1项不完整")
         self.assertIn("仅获得部分数据", result.detail)
         self.assertNotIn("命令/SQL 错误", result.detail)
-
-    def test_known_legacy_acl_null_warning_is_not_an_incomplete_result(self):
-        self.write("env.info", "platform=windows\nschema_version=4.3\ncollector_version=4.3.3\nhostname=WIN-ORA01\ncheck_type=db\n")
-        self.write("collection_manifest.tsv", "item\ttype\tstatus\texit_code\tmessage\noracle_config_acl.txt\tCOMMAND\tWARN\t1\tYou cannot call a method on a null-valued expression.\n")
-        result = baseline.parse_configuration_acl(self.raw / "security")
-        self.assertEqual(result.status, "INFO")
-        self.assertEqual(result.value, "旧版未采集")
 
     def test_malformed_and_empty_data_are_not_zero_healthy(self):
         for text in ("", "BAD|HEADER\n", NETWORK, NETWORK + "NIC|short\n"):
@@ -185,25 +177,25 @@ class WindowsBaselineTests(unittest.TestCase):
         self.write("db/oracle_memory_config.txt", MEMORY + "|||||||||NO_LOCAL_SERVICE|\n")
         self.assertEqual(baseline.parse_windows_large_pages(str(self.raw)).status, "UNKNOWN")
 
-    def test_configuration_write_acls_are_risks(self):
-        for kind, rights, expected in (("REGISTRY", "SetValue", "WARN"),
-                                       ("NETWORK_FILE", "Modify", "WARN"),
-                                       ("NETWORK_FILE", "ReadAndExecute", "INFO")):
-            self.write("security/oracle_config_acl.txt", ACL + f"{kind}|D:\\Oracle|owner|本地化名称|S-1-5-32-545|{rights}|Allow|True||OBSERVED\n")
-            self.assertEqual(baseline.parse_configuration_acl(self.raw / "security").status, expected)
-
-    def test_legacy_wallet_acl_rows_are_ignored(self):
-        self.write("security/oracle_config_acl.txt", ACL + "WALLET|D:\\wallet|owner|Everyone|S-1-1-0|FullControl|Allow|False||OBSERVED\n")
-        result = baseline.parse_configuration_acl(self.raw / "security")
-        self.assertEqual(result.name, "Oracle配置ACL")
-        self.assertEqual(result.status, "INFO")
-        self.assertNotIn("D:\\wallet", result.extra_html)
-
-    def test_acl_deny_not_counted_as_grant_unresolved_requires_review(self):
-        self.write("security/oracle_config_acl.txt", ACL + "NETWORK_FILE|D:\\Oracle\\network\\admin\\sqlnet.ora|owner|Everyone|S-1-1-0|FullControl|Deny|False||OBSERVED\n")
-        self.assertEqual(baseline.parse_configuration_acl(self.raw / "security").status, "INFO")
-        self.write("security/oracle_config_acl.txt", ACL + "NETWORK_FILE|%UNKNOWN%||||||||UNRESOLVED_PATH\n")
-        self.assertEqual(baseline.parse_configuration_acl(self.raw / "security").status, "UNKNOWN")
+    def test_retired_configuration_acl_is_ignored_without_hiding_other_failures(self):
+        self.write("env.info", "platform=windows\ncheck_type=db\ncollector_version=4.4\n")
+        self.write("security/oracle_config_acl.txt", "ORA-00942: old collection failure\n")
+        for status in ("WARN", "FAILED", "SKIPPED", "OK"):
+            with self.subTest(status=status):
+                manifest = ("item\ttype\tstatus\texit_code\tmessage\n"
+                            f"oracle_config_acl.txt\tCOMMAND\t{status}\t1\tCannot find registry path\n")
+                self.write("collection_manifest.tsv", manifest)
+                for scopes in (None, ("db", "security")):
+                    result = parse_collection_integrity(str(self.raw), scopes=scopes)
+                    self.assertEqual(result.status, "INFO")
+                    self.assertEqual(result.value, "完整")
+                    self.assertNotIn("oracle_config_acl", result.extra_html)
+                self.write("collection_manifest.tsv", manifest + "db_version.txt\tSQL\tFAILED\t1\tORA-00942\n")
+                result = parse_collection_integrity(str(self.raw), scopes=("db", "security"))
+                self.assertEqual(result.status, "UNKNOWN")
+                self.assertEqual(result.value, "1项失败")
+                self.assertIn("db_version.txt", result.extra_html)
+        self.assertNotIn("Oracle配置ACL", {r.name for r in parse_security(str(self.raw))})
 
     def test_phase2_items_reach_dispatch_html_and_docx(self):
         self.write("host/network_quality.txt", NETWORK + "TCP|TCPv4|5||||||1000|60|VALID\n")
@@ -215,7 +207,7 @@ class WindowsBaselineTests(unittest.TestCase):
         self.assertIn("Windows网络质量", names)
         self.assertIn("Oracle Windows大页", {r.name for r in parse_db(str(self.raw))["db"]})
         security_names = {r.name for r in parse_security(str(self.raw))}
-        self.assertIn("Oracle配置ACL", security_names)
+        self.assertNotIn("Oracle配置ACL", security_names)
         self.assertNotIn("Oracle配置与Wallet ACL", security_names)
         report = build_report([str(self.raw)], str(Path(self.temp.name) / "report.html"), write_html=True, write_docx=True)
         html = Path(report.html).read_text(encoding="utf-8")

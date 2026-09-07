@@ -72,6 +72,10 @@ def parse_env_info(raw_dir: str) -> dict:
     return env
 
 
+# Retired inspection outputs remain in old packages but are outside report scope.
+RETIRED_COLLECTION_ITEMS = {"oracle_config_acl.txt"}
+
+
 def manifest_warning_is_nonblocking(row: dict, env_info=None) -> bool:
     """Recognize legacy/advisory warnings that did not invalidate collected data."""
     if row.get("status") != "WARN":
@@ -79,13 +83,9 @@ def manifest_warning_is_nonblocking(row: dict, env_info=None) -> bool:
     item = row.get("item", "")
     kind = row.get("type", "")
     exit_code = str(row.get("exit_code", "")).strip()
-    message = row.get("message", "").lower()
     if item == "sqlplus_startup_profile" and kind == "ENV" and exit_code in ("", "0"):
         return True
-    version = (env_info or {}).get("collector_version", "")
-    legacy_acl_versions = {"4.3.2", "4.3.3"}
-    null_expression = "null-valued expression" in message or "null 值表达式" in message
-    return item == "oracle_config_acl.txt" and version in legacy_acl_versions and null_expression
+    return False
 
 
 def parse_collection_integrity(raw_dir: str, scopes=None) -> CheckResult:
@@ -103,6 +103,8 @@ def parse_collection_integrity(raw_dir: str, scopes=None) -> CheckResult:
     ]
 
     def in_scope(item: str) -> bool:
+        if os.path.basename(str(item or "").replace("\\", "/")) in RETIRED_COLLECTION_ITEMS:
+            return False
         if not scopes:
             return True
         name = os.path.basename(str(item or ""))
@@ -151,7 +153,7 @@ def parse_collection_integrity(raw_dir: str, scopes=None) -> CheckResult:
     for scan_root in scan_roots:
         for root, _, files in os.walk(scan_root):
             for name in files:
-                if name in diagnostic_outputs:
+                if name in diagnostic_outputs or name in RETIRED_COLLECTION_ITEMS:
                     continue
                 path = os.path.join(root, name)
                 try:

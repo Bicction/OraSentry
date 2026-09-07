@@ -16,20 +16,36 @@ function Collect-WindowsSecurity {
     New-Item -ItemType Directory -Force -Path $secDir | Out-Null
     Write-CollectorLog -Context $Context -Message "开始采集 Oracle 与 Windows 安全数据"
 
+    $versionText = Invoke-OraScalar $Context "SELECT version FROM v`$instance;"
+    $majorMatch = [regex]::Match($versionText, '\d+')
+    $major = if ($majorMatch.Success) { [int]$majorMatch.Value } else { 0 }
+    $builtinUsers = "'ANONYMOUS','APEX_PUBLIC_USER','APPQOSSYS','AUDSYS','CTXSYS','DBSFWUSER','DBSNMP','DIP','DVF','DVSYS','EXFSYS','FLOWS_FILES','GGSYS','GSMADMIN_INTERNAL','GSMCATUSER','GSMUSER','LBACSYS','MDDATA','MDSYS','OJVMSYS','OLAPSYS','ORACLE_OCM','ORDDATA','ORDSYS','OUTLN','REMOTE_SCHEDULER_AGENT','SI_INFORMTN_SCHEMA','SPATIAL_CSW_ADMIN_USR','SPATIAL_WFS_ADMIN_USR','SYS','SYS`$UMF','SYSBACKUP','SYSDG','SYSKM','SYSRAC','SYSTEM','WMSYS','XDB','XS`$NULL'"
+    $builtinRoles = "'CONNECT','RESOURCE','DBA','CTXAPP','SELECT_CATALOG_ROLE','EXECUTE_CATALOG_ROLE','EXP_FULL_DATABASE','IMP_FULL_DATABASE','DATAPUMP_EXP_FULL_DATABASE','DATAPUMP_IMP_FULL_DATABASE','SCHEDULER_ADMIN','GSMADMIN_ROLE','GSMUSER_ROLE','SYSUMF_ROLE'"
+
+    if ($major -ge 18) {
+        $sysPrivQuery = "WITH principals AS (SELECT username principal FROM dba_users WHERE oracle_maintained='N' UNION SELECT role FROM dba_roles WHERE oracle_maintained='N') SELECT DISTINCT p.grantee,p.privilege,p.admin_option FROM dba_sys_privs p JOIN principals x ON x.principal=p.grantee ORDER BY p.grantee,p.privilege;"
+    } elseif ($major -ge 12) {
+        $sysPrivQuery = "WITH business_users AS (SELECT username FROM dba_users WHERE oracle_maintained='N'), principals AS (SELECT username principal FROM business_users UNION SELECT granted_role FROM dba_role_privs WHERE grantee IN (SELECT username FROM business_users) AND granted_role NOT IN ($builtinRoles)) SELECT DISTINCT p.grantee,p.privilege,p.admin_option FROM dba_sys_privs p JOIN principals x ON x.principal=p.grantee ORDER BY p.grantee,p.privilege;"
+    } else {
+        $sysPrivQuery = "WITH business_users AS (SELECT username FROM dba_users WHERE username NOT IN ($builtinUsers)), principals AS (SELECT username principal FROM business_users UNION SELECT granted_role FROM dba_role_privs WHERE grantee IN (SELECT username FROM business_users) AND granted_role NOT IN ($builtinRoles)) SELECT DISTINCT p.grantee,p.privilege,p.admin_option FROM dba_sys_privs p JOIN principals x ON x.principal=p.grantee ORDER BY p.grantee,p.privilege;"
+    }
+    $oracleMaintainedExpr = if ($major -ge 12) { "oracle_maintained" } else { "CAST('N' AS VARCHAR2(1)) oracle_maintained" }
+    $publicOwnerFilter = if ($major -ge 12) { "AND NOT EXISTS (SELECT 1 FROM dba_users u WHERE u.username=p.owner AND u.oracle_maintained='Y')" } else { "AND p.owner NOT IN ($builtinUsers)" }
+
     $queries = [ordered]@{
         "password_policy.txt" = "SELECT profile, resource_name, resource_type, limit FROM dba_profiles WHERE resource_name IN ('PASSWORD_LIFE_TIME','PASSWORD_REUSE_TIME','PASSWORD_REUSE_MAX','PASSWORD_LOCK_TIME','PASSWORD_GRACE_TIME','PASSWORD_VERIFY_FUNCTION','FAILED_LOGIN_ATTEMPTS') ORDER BY profile, resource_name;"
         "profiles.txt" = "SELECT DISTINCT profile FROM dba_profiles ORDER BY profile;"
-        "db_users.txt" = "SELECT username, account_status, expiry_date, lock_date, default_tablespace, profile, created, CAST(NULL AS VARCHAR2(64)) last_login, CAST(NULL AS VARCHAR2(30)) authentication_type, CAST(NULL AS VARCHAR2(30)) password_versions, CAST('N' AS VARCHAR2(1)) oracle_maintained, CAST('NO' AS VARCHAR2(3)) common FROM dba_users ORDER BY username;"
+        "db_users.txt" = "SELECT username, account_status, expiry_date, lock_date, default_tablespace, profile, created, CAST(NULL AS VARCHAR2(64)) last_login, CAST(NULL AS VARCHAR2(30)) authentication_type, CAST(NULL AS VARCHAR2(30)) password_versions, $oracleMaintainedExpr, CAST('NO' AS VARCHAR2(3)) common FROM dba_users ORDER BY username;"
         "dba_role_users.txt" = "SELECT grantee, granted_role FROM dba_role_privs WHERE granted_role='DBA' ORDER BY grantee;"
-        "sys_privs.txt" = "WITH business_users AS (SELECT username FROM dba_users WHERE username NOT IN ('SYS','SYSTEM','DBSNMP','APPQOSSYS','MDSYS','OUTLN','SYSMAN','XDB')), principals AS (SELECT username principal FROM business_users UNION SELECT granted_role FROM dba_role_privs WHERE grantee IN (SELECT username FROM business_users) AND granted_role NOT IN ('CONNECT','RESOURCE','DBA')) SELECT DISTINCT p.grantee,p.privilege,p.admin_option FROM dba_sys_privs p JOIN principals x ON x.principal=p.grantee ORDER BY p.grantee,p.privilege;"
+        "sys_privs.txt" = $sysPrivQuery
         "audit_settings.txt" = "SELECT name, value FROM v`$parameter WHERE name LIKE '%audit%';"
         "traditional_audit_options.txt" = "SELECT user_name, proxy_name, audit_option, success, failure FROM dba_stmt_audit_opts ORDER BY user_name, audit_option;"
-        "public_risky_grants.txt" = "SELECT owner, table_name, privilege, grantable FROM dba_tab_privs WHERE grantee='PUBLIC' AND privilege IN ('EXECUTE','READ','WRITE') AND table_name IN ('UTL_FILE','UTL_HTTP','UTL_TCP','UTL_SMTP','DBMS_SCHEDULER','DBMS_JOB','DBMS_LOB','DBMS_SQL','DBMS_RANDOM') ORDER BY owner,table_name,privilege;"
+        "public_risky_grants.txt" = "SELECT p.owner, p.table_name, p.privilege, p.grantable FROM dba_tab_privs p WHERE p.grantee='PUBLIC' AND p.privilege IN ('EXECUTE','READ','WRITE') AND p.table_name IN ('UTL_FILE','UTL_HTTP','UTL_TCP','UTL_SMTP','DBMS_SCHEDULER','DBMS_JOB','DBMS_LOB','DBMS_SQL','DBMS_RANDOM') $publicOwnerFilter ORDER BY p.owner,p.table_name,p.privilege;"
         "security_parameters.txt" = "SELECT name, value, isdefault FROM v`$parameter WHERE name IN ('remote_login_passwordfile','remote_os_authent','os_authent_prefix','sec_case_sensitive_logon','sql92_security','_allow_insert_with_update_check') ORDER BY name;"
     }
     foreach ($entry in $queries.GetEnumerator()) { Invoke-RegisteredSql $Context $secDir $entry.Key $entry.Value }
 
-    if ([int](([regex]::Match((Invoke-OraScalar $Context "SELECT version FROM v`$instance;"), '^\d+')).Value) -ge 12) {
+    if ($major -ge 12) {
         Invoke-RegisteredSql $Context $secDir "unified_audit_policies.txt" "SELECT * FROM audit_unified_enabled_policies;" -Optional
     } else {
         Skip-SqlCollection $Context $secDir "unified_audit_policies.txt" "POLICY_NAME" "当前版本不支持统一审计视图"
@@ -74,5 +90,4 @@ function Collect-WindowsSecurity {
     }
 
     Write-CollectorLog -Context $Context -Message "Oracle 与 Windows 安全数据采集完成"
-    Collect-OracleConfigurationAcls $Context $secDir
 }

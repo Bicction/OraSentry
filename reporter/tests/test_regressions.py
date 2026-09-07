@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """关键误判与安全回归测试。"""
 import io
+import ast
 import os
 import re
 import sys
@@ -95,10 +96,10 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(rows[1], ["1", "", "3"])
 
     def test_v43_reporter_and_windows_version_are_consistent(self):
-        self.assertEqual(APP_VERSION, "4.3.7")
+        self.assertEqual(APP_VERSION, "4.4")
         version_info = Path(ROOT, "tools", "version_info.txt").read_text(encoding="utf-8")
-        self.assertIn("filevers=(4, 3, 7, 0)", version_info)
-        self.assertIn("ProductVersion', '4.3.7.0'", version_info)
+        self.assertIn("filevers=(4, 3, 8, 0)", version_info)
+        self.assertIn("ProductVersion', '4.4.0.0'", version_info)
 
     def test_windows_build_stages_exe_without_cleaning_distribution(self):
         script = Path(ROOT, "tools", "build_windows.ps1").read_text(encoding="utf-8-sig")
@@ -179,8 +180,8 @@ class RegressionTests(unittest.TestCase):
             )
             result = _parse_alert_log(td)
             self.assertEqual(result.status, "CRIT")
-            self.assertEqual(result.value, "1440条近30天告警 / 日志 3.00 GB")
-            self.assertIn("物理日志告警明细: 1 条", result.detail)
+            self.assertEqual(result.value, "1个已观测告警事件 / 1组（证据有限） / 日志 3.00 GB")
+            self.assertIn("采集端关键词命中 1440 行（非事件数）", result.detail)
             self.assertIn("分析时间范围: 2026-08-01 08:00:00 至 2026-08-24 10:00:00", result.detail)
             self.assertNotIn("文件尾部", result.detail)
             self.assertNotIn("10万行", result.extra_html)
@@ -215,8 +216,8 @@ class RegressionTests(unittest.TestCase):
                 + "\n".join(rows) + "\n",
             )
             result = _parse_alert_log(td)
-            self.assertEqual(result.value, "至少200条近7天告警")
-            self.assertIn("至少200", result.detail)
+            self.assertEqual(result.value, "200个已观测告警事件 / 1组（证据有限）")
+            self.assertIn("200 行采集上限", result.extra_html)
 
     def test_boot_efi_disk_is_not_alerted(self):
         with tempfile.TemporaryDirectory() as td:
@@ -544,6 +545,45 @@ class RegressionTests(unittest.TestCase):
             self.assertEqual(result.value, "存在提示")
             self.assertIn("提示：未启用 FORCE LOGGING", result.detail)
             self.assertEqual(result.suggestion, "")
+
+    def test_flashback_disabled_is_optional_hint_not_warning(self):
+        with tempfile.TemporaryDirectory() as td:
+            Path(td, "db_resilience.txt").write_text(
+                "FORCE_LOGGING|FLASHBACK_ON|SUPPLEMENTAL_LOG_DATA_MIN|DATABASE_ROLE|PROTECTION_MODE|PROTECTION_LEVEL|SWITCHOVER_STATUS\n"
+                "YES|NO|NO|PRIMARY|MAXIMUM PERFORMANCE|MAXIMUM PERFORMANCE|NOT ALLOWED\n",
+                encoding="utf-8",
+            )
+            result = _parse_database_resilience(td)[0]
+            self.assertEqual(result.status, "OK")
+            self.assertEqual(result.value, "存在提示")
+            self.assertIn("未启用 Flashback Database（可选恢复能力）", result.detail)
+            self.assertEqual(result.suggestion, "")
+
+    def test_security_checks_exclude_oracle_maintained_principals(self):
+        with tempfile.TemporaryDirectory() as td:
+            sec = Path(td)
+            Path(sec, "audit_settings.txt").write_text(
+                "NAME|VALUE\naudit_trail|DB\naudit_sys_operations|TRUE\n", encoding="utf-8")
+            Path(sec, "db_users.txt").write_text(
+                "USERNAME|ACCOUNT_STATUS|EXPIRY_DATE|LOCK_DATE|DEFAULT_TABLESPACE|PROFILE|CREATED|LAST_LOGIN|AUTHENTICATION_TYPE|PASSWORD_VERSIONS|ORACLE_MAINTAINED|COMMON\n"
+                "SYS|OPEN|||||||||Y|YES\nAPPUSER|OPEN|||||||||N|NO\n", encoding="utf-8")
+            Path(sec, "public_risky_grants.txt").write_text(
+                "OWNER|TABLE_NAME|PRIVILEGE|GRANTABLE\nSYS|UTL_HTTP|EXECUTE|NO\nAPPUSER|UTL_HTTP|EXECUTE|NO\n",
+                encoding="utf-8")
+            Path(sec, "sys_privs.txt").write_text(
+                "GRANTEE|PRIVILEGE|ADMIN_OPTION\nSYS|CREATE SESSION|YES\nSELECT_CATALOG_ROLE|SELECT ANY DICTIONARY|YES\nAPPUSER|CREATE ANY TABLE|YES\n",
+                encoding="utf-8")
+            results = {item.name: item for item in _parse_audit_and_access_controls(str(sec))}
+            public = results["PUBLIC高风险授权"]
+            system = results["系统权限最小化"]
+            self.assertEqual(public.value, "1项")
+            self.assertNotIn(">SYS<", public.extra_html)
+            self.assertIn("APPUSER", public.extra_html)
+            self.assertIn("已排除内置授权 1 项", public.detail)
+            self.assertEqual(system.value, "1项非内置主体授权")
+            self.assertNotIn("SELECT_CATALOG_ROLE", system.extra_html)
+            self.assertIn("APPUSER", system.extra_html)
+            self.assertIn("已排除内置授权 2 项", system.detail)
 
     def test_actions_are_severity_sorted_and_clickable(self):
         results = {
@@ -913,6 +953,16 @@ class RegressionTests(unittest.TestCase):
             self.assertEqual(score_band(79), "WARN")
             self.assertEqual(score_band(60), "WARN")
             self.assertEqual(score_band(59), "CRIT")
+
+    def test_gui_defers_report_engine_import_until_generation(self):
+        tree = ast.parse(Path(SOURCE_ROOT, "gui.py").read_text(encoding="utf-8"))
+        top_level_imports = [
+            alias.name
+            for node in tree.body
+            if isinstance(node, (ast.Import, ast.ImportFrom))
+            for alias in node.names
+        ]
+        self.assertNotIn("report_gen", top_level_imports)
 
     def test_drag_drop_accepts_archives_and_folders_only(self):
         with tempfile.TemporaryDirectory() as td:

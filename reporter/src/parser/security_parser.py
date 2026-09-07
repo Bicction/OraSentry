@@ -9,6 +9,31 @@ from parser.base import CheckResult, read_file, read_lines, generate_data_table,
 from config import SECURITY_THRESHOLDS
 
 
+# Used for legacy collection packages that predate DBA_USERS.ORACLE_MAINTAINED.
+# New collectors additionally export the database's own authoritative flag.
+ORACLE_BUILTIN_PRINCIPALS = {
+    "ANONYMOUS", "APEX_PUBLIC_USER", "APPQOSSYS", "AUDSYS", "CTXSYS",
+    "DBSFWUSER", "DBSNMP", "DIP", "DVF", "DVSYS", "EXFSYS", "FLOWS_FILES",
+    "GGSYS", "GSMADMIN_INTERNAL", "GSMCATUSER", "GSMUSER", "LBACSYS",
+    "MDDATA", "MDSYS", "OJVMSYS", "OLAPSYS", "ORACLE_OCM", "ORDDATA",
+    "ORDSYS", "OUTLN", "REMOTE_SCHEDULER_AGENT", "SI_INFORMTN_SCHEMA",
+    "SPATIAL_CSW_ADMIN_USR", "SPATIAL_WFS_ADMIN_USR", "SYS", "SYS$UMF",
+    "SYSBACKUP", "SYSDG", "SYSKM", "SYSRAC", "SYSTEM", "WMSYS", "XDB",
+    "XS$NULL", "AQ_ADMINISTRATOR_ROLE", "AQ_USER_ROLE", "CONNECT", "CTXAPP", "DBA",
+    "DATAPUMP_EXP_FULL_DATABASE", "DATAPUMP_IMP_FULL_DATABASE",
+    "DELETE_CATALOG_ROLE", "EM_EXPRESS_ALL", "EM_EXPRESS_BASIC",
+    "EXECUTE_CATALOG_ROLE", "EXP_FULL_DATABASE", "GATHER_SYSTEM_STATISTICS",
+    "GLOBAL_AQ_USER_ROLE", "GSMADMIN_ROLE", "GSMUSER_ROLE", "HS_ADMIN_EXECUTE_ROLE", "HS_ADMIN_ROLE",
+    "HS_ADMIN_SELECT_ROLE", "IMP_FULL_DATABASE", "JAVA_ADMIN", "JAVA_DEPLOY",
+    "JAVADEBUGPRIV", "JAVAIDPRIV", "JAVASYSPRIV", "JAVAUSERPRIV",
+    "LOGSTDBY_ADMINISTRATOR", "OEM_MONITOR", "OLAP_DBA", "OLAP_USER",
+    "OPTIMIZER_PROCESSING_RATE", "RECOVERY_CATALOG_OWNER", "RESOURCE",
+    "SCHEDULER_ADMIN", "SELECT_CATALOG_ROLE", "SYSUMF_ROLE", "WM_ADMIN_ROLE", "XDBADMIN",
+    "XDB_SET_INVOKER", "XDB_WEBSERVICES", "XDB_WEBSERVICES_OVER_HTTP",
+    "XDB_WEBSERVICES_WITH_PUBLIC",
+}
+
+
 def parse_security(raw_dir: str) -> List[CheckResult]:
     """解析安全巡检数据"""
     results = []
@@ -21,8 +46,6 @@ def parse_security(raw_dir: str) -> List[CheckResult]:
     if platform == "windows":
         from parser.windows_security_parser import parse_windows_os_security
         results.append(parse_windows_os_security(sec_dir))
-        from parser.windows_baseline_parser import parse_configuration_acl
-        results.append(parse_configuration_acl(sec_dir))
     else:
         results.append(_parse_os_security(sec_dir))
     results.append(_parse_listener_security(sec_dir))
@@ -45,6 +68,27 @@ def _parse_pipe_table(content: str) -> list:
         if any(parts):
             rows.append(parts)
     return rows
+
+
+def _oracle_maintained_principals(sec_dir: str) -> set:
+    """Combine authoritative collector metadata with a legacy-safe fallback."""
+    maintained = set(ORACLE_BUILTIN_PRINCIPALS)
+    rows = _parse_pipe_table(read_file(f"{sec_dir}/db_users.txt"))
+    header_index = next(
+        (index for index, row in enumerate(rows)
+         if "USERNAME" in [cell.upper() for cell in row]
+         and "ORACLE_MAINTAINED" in [cell.upper() for cell in row]),
+        None,
+    )
+    if header_index is None:
+        return maintained
+    header = [cell.upper() for cell in rows[header_index]]
+    username_index = header.index("USERNAME")
+    maintained_index = header.index("ORACLE_MAINTAINED")
+    for row in rows[header_index + 1:]:
+        if len(row) > max(username_index, maintained_index) and row[maintained_index].upper() == "Y":
+            maintained.add(row[username_index].upper())
+    return maintained
 
 
 def _parse_password_policy(sec_dir: str) -> CheckResult:
@@ -142,21 +186,26 @@ def _parse_audit_and_access_controls(sec_dir: str) -> List[CheckResult]:
         extra_html=(generate_data_table([f"列{i+1}" for i in range(max(len(r) for r in unified))], unified[:50]) if unified else "")
     ))
 
-    public_grants = _data_rows(read_file(f"{sec_dir}/public_risky_grants.txt"), "OWNER")
+    maintained = _oracle_maintained_principals(sec_dir)
+    raw_public_grants = _data_rows(read_file(f"{sec_dir}/public_risky_grants.txt"), "OWNER")
+    public_grants = [r for r in raw_public_grants if r and r[0].upper() not in maintained]
+    public_excluded = len(raw_public_grants) - len(public_grants)
     public_status = "WARN" if public_grants else "OK"
     results.append(CheckResult(
         "PUBLIC高风险授权", public_status, f"{len(public_grants)}项",
-        "检查 PUBLIC 对网络、文件与调度相关内置包的授权",
+        f"检查非 Oracle 内置所有者的高风险 PUBLIC 授权；已排除内置授权 {public_excluded} 项",
         "按最小权限原则评估并回收不必要的 PUBLIC 授权；变更前验证应用依赖" if public_grants else "",
         extra_html=generate_data_table(["所有者", "对象", "权限", "可转授权"], public_grants) if public_grants else ""
     ))
 
-    sys_privs = _data_rows(read_file(f"{sec_dir}/sys_privs.txt"), "GRANTEE")
+    raw_sys_privs = _data_rows(read_file(f"{sec_dir}/sys_privs.txt"), "GRANTEE")
+    sys_privs = [r for r in raw_sys_privs if r and r[0].upper() not in maintained]
+    sys_excluded = len(raw_sys_privs) - len(sys_privs)
     admin_privs = [r for r in sys_privs if len(r) >= 3 and r[2].upper() == "YES"]
     priv_status = "WARN" if admin_privs else "OK"
     results.append(CheckResult(
-        "系统权限最小化", priv_status, f"{len(sys_privs)}项非核心授权",
-        f"非 SYS/SYSTEM/DBA 的系统权限: {len(sys_privs)}，含 ADMIN OPTION: {len(admin_privs)}",
+        "系统权限最小化", priv_status, f"{len(sys_privs)}项非内置主体授权",
+        f"非 Oracle 内置主体的系统权限: {len(sys_privs)}，含 ADMIN OPTION: {len(admin_privs)}；已排除内置授权 {sys_excluded} 项",
         "重点复核带 ADMIN OPTION 的系统权限及高权限业务账号" if admin_privs else "",
         extra_html=generate_data_table(["被授权人", "系统权限", "ADMIN OPTION"], sys_privs[:100]) if sys_privs else ""
     ))

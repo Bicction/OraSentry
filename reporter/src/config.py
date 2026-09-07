@@ -117,7 +117,6 @@ CHECK_SCORE_WEIGHTS = {
     "Windows故障转移集群": 5,
     "Oracle锁页权限与大页配置": 3,
     "Oracle Windows大页": 3,
-    "Oracle配置ACL": 3,
     "页面文件使用率": 3,
     "数据库韧性配置": 3,
     "Redo Log": 3,

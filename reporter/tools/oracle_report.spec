@@ -17,7 +17,10 @@ a = Analysis(
     ["../src/gui.py"],
     pathex=["../src"],
     binaries=[],
-    datas=[("../resources/templates/html_template.html", "resources/templates")] + dnd_datas,
+    datas=[
+        ("../resources/templates/html_template.html", "resources/templates"),
+        ("../resources/ora/catalog.json", "resources/ora"),
+    ] + dnd_datas,
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},

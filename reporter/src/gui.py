@@ -25,7 +25,6 @@ except ImportError:  # 源码环境未安装拖放扩展时仍可使用文件选
     TkinterDnD = None
 
 from config import REPORT_CONFIG
-from report_gen import BatchOutputs, ReportBuildError, build_reports, expand_input_paths
 from scoring import calculate_score_breakdown, score_band
 
 
@@ -100,6 +99,38 @@ def filter_dropped_paths(paths):
         elif path:
             rejected.append(path)
     return accepted, rejected
+
+
+def expand_input_paths(paths):
+    """Lightweight input discovery; keep report parsers unloaded at GUI startup."""
+    expanded = []
+    for path in paths:
+        if not path:
+            continue
+        normalized = os.path.normpath(path)
+        if os.path.isdir(normalized) and not os.path.isfile(os.path.join(normalized, "env.info")):
+            try:
+                names = sorted(os.listdir(normalized))
+            except OSError:
+                expanded.append(normalized)
+                continue
+            archives = []
+            raw_subdirs = []
+            for name in names:
+                full = os.path.join(normalized, name)
+                lower = name.lower()
+                if os.path.isfile(full) and (lower.endswith(".tar.gz") or lower.endswith(".tgz")):
+                    archives.append(full)
+                elif os.path.isdir(full) and os.path.isfile(os.path.join(full, "env.info")):
+                    raw_subdirs.append(full)
+            if archives:
+                expanded.extend(archives)
+                continue
+            if len(raw_subdirs) > 1:
+                expanded.extend(raw_subdirs)
+                continue
+        expanded.append(normalized)
+    return expanded
 
 
 def classify_input(path):
@@ -209,7 +240,7 @@ class CheckMarkBox(tk.Frame):
 class ReportApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Oracle 巡检报告生成器 v4.3")
+        self.root.title("OraSentry Oracle自动化巡检 v4.4")
         self.root.configure(bg=COLORS["bg"])
 
         self.input_paths = []
@@ -347,7 +378,7 @@ class ReportApp:
         )
         mark.grid(row=0, column=0, rowspan=2, padx=(16, 12), pady=13)
         tk.Label(
-            header, text="Oracle 巡检报告生成器",
+            header, text="OraSentry 自动化巡检",
             bg=COLORS["navy"], fg="#ffffff",
             font=("Segoe UI", 18, "bold"),
         ).grid(row=0, column=1, sticky="sw", pady=(12, 0))
@@ -356,7 +387,7 @@ class ReportApp:
             bg=COLORS["navy"], fg="#b8cbe0", font=("Segoe UI", 9),
         ).grid(row=1, column=1, sticky="nw", pady=(2, 12))
         version = tk.Label(
-            header, text="VERSION 4.3", bg=COLORS["navy_light"], fg="#dbeafe",
+            header, text="VERSION 4.4", bg=COLORS["navy_light"], fg="#dbeafe",
             font=("Segoe UI", 8, "bold"), padx=12, pady=6,
         )
         version.grid(row=0, column=2, rowspan=2, padx=16)
@@ -990,6 +1021,15 @@ class ReportApp:
     def _run_build(self, input_paths, output_dir, write_html, write_docx,
                    write_summary, generate_summary_content, project_name):
         try:
+            # Report parsers and the large offline ORA catalog are loaded only
+            # after the user starts generation, and on the worker thread.
+            from report_gen import ReportBuildError, build_reports
+        except Exception:
+            detail = traceback.format_exc()
+            self.root.after(0, lambda value=detail: self._on_error(value))
+            return
+
+        try:
             def progress(index, total, label):
                 self.root.after(
                     0,
@@ -1016,7 +1056,7 @@ class ReportApp:
             detail = traceback.format_exc()
             self.root.after(0, lambda value=detail: self._on_error(value))
 
-    def _on_success(self, batch: BatchOutputs):
+    def _on_success(self, batch):
         reports = batch.reports
         last = reports[-1]
         self.last_html = next((item.html for item in reversed(reports) if item.html), None)
@@ -1121,7 +1161,7 @@ class ReportApp:
         else:
             messagebox.showinfo("生成完成", "\n".join(lines))
 
-    def _on_cancelled(self, batch: BatchOutputs):
+    def _on_cancelled(self, batch):
         """展示安全停止结果；已经完整生成的报告继续可打开。"""
         reports = batch.reports
         self.last_html = next((item.html for item in reversed(reports) if item.html), None)

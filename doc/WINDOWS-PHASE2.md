@@ -16,7 +16,6 @@ schema_version仍为4.3。采集表为UTF-8无BOM、竖线分隔。新增文件�
 | host/windows_cluster.txt | 是否安装/配置、ClusSvc、节点、组、资源、网络、仲裁 |
 | host或db/oracle_memory_config.txt | Oracle服务/SID/账号、Oracle Home/注册表、全局及实例大页模式、锁页授权证据 |
 | db/windows_large_pages.txt | 数据库实例/主机、USE_LARGE_PAGES、LOCK_SGA、SGA及AMM参数 |
-| security/oracle_config_acl.txt | 网络配置及匹配Oracle Home注册表：路径、所有者、SID、ACL、文件修改时间及证据状态 |
 
 ## 默认规则与边界
 
@@ -26,7 +25,6 @@ schema_version仍为4.3。采集表为UTF-8无BOM、竖线分隔。新增文件�
 - 审计默认要求登录成功+失败，其余三个子类别记录成功事件。通过Windows API读系统策略，与显示语言无关；不是全量合规认证。读取时只临时启用调用进程已被授予的SeSecurityPrivilege，随后恢复。
 - 大页按实例ORA_SID_LPENABLE优先、全局ORA_LPENABLE兜底。0/未设置不自动告警；1为常规、2为混合模式。仅直接SID/已枚举本地组可以确认配置授权，域继承与运行中服务令牌未验证。未匹配注册表或已配置大页但授权未确认为UNKNOWN。数据来自配置，并不证明当前SGA实际使用大页。
 - 数据库HOST_NAME与采集机不匹配时不关联本地注册表/服务；Windows的大页不能仅凭USE_LARGE_PAGES判定。匹配本地配置且同时启用大页和LOCK_SGA时提示WARN，需按版本核验启动冲突。
-- ACL只保存Oracle网络配置及匹配Oracle Home注册表的元数据。检查Oracle Home默认network/admin、采集进程TNS_ADMIN及匹配Home注册表TNS_ADMIN作为候选路径，不能保证均为服务实际生效目录。UNC、含未展开变量、非本地绝对路径仅记录待核验，不触发网络认证。Deny优先级及嵌套组的最终有效权限仍需复核。
 - 集群为Windows Failover Cluster，不是Oracle RAC。未安装/未配置为INFO；节点Down、资源Failed或已配置但ClusSvc停止为CRIT；Offline/Paused为WARN并提示核查维护状态。NodeMajority没有见证并不自动认定仲裁失败。管理模块/权限不可用为UNKNOWN。
 
 阈值集中在reporter/src/config.py。所有操作需在目标服务器本地执行；远程SQL连接不使Windows采集自动转移到数据库服务器。CHECK_SECURITY仍控制数据库安全模块，主机基线随主机巡检运行。
@@ -42,7 +40,7 @@ python -m unittest discover -s reporter\tests -v
 powershell -NoProfile -ExecutionPolicy Bypass -File reporter\tools\build_windows.ps1
 ```
 
-验收包括旧包INFO、采集失败UNKNOWN、格式异常、低流量/计数器重置、Defender被动模式、SID本地化、审计缺项、集群不可用/离线/失败、大页实例覆盖与远程身份隔离、配置文件及注册表写权限，以及HTML/DOCX输出。必须另用实际主机采集包验证受影响报告，并核对EXE时间戳晚于源码且SHA256匹配。没有真实Oracle/集群的环境只可验证相应回归数据，不应声称完成生产集群联调。
+验收包括旧包INFO、采集失败UNKNOWN、格式异常、低流量/计数器重置、Defender被动模式、SID本地化、审计缺项、集群不可用/离线/失败、大页实例覆盖与远程身份隔离，以及HTML/DOCX输出。必须另用实际主机采集包验证受影响报告，并核对EXE时间戳晚于源码且SHA256匹配。没有真实Oracle/集群的环境只可验证相应回归数据，不应声称完成生产集群联调。
 
 ## 规则参考
 
@@ -51,3 +49,5 @@ powershell -NoProfile -ExecutionPolicy Bypass -File reporter\tools\build_windows
 - [Microsoft Get-MpComputerStatus](https://learn.microsoft.com/en-us/powershell/module/defender/get-mpcomputerstatus)：Defender状态属性。
 - [Microsoft AuditQuerySystemPolicy](https://learn.microsoft.com/en-us/windows/win32/api/ntsecapi/nf-ntsecapi-auditquerysystempolicy)：高级审计查询与权限要求。
 - [Microsoft secedit /export](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/secedit-export)：只导出合并用户权限策略，临时全量权限文件在读取目标权限后移除，不进入采集包。
+
+Oracle 配置 ACL 巡检项已移除，旧包中的 oracle_config_acl.txt 及对应执行清单记录不再参与报告和完整性判定。

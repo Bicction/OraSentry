@@ -40,7 +40,7 @@ CHECK_ITEM_EXPLANATIONS = {
     "失效索引": "检查 UNUSABLE 等不可用索引，重点关注访问性能和 DML 失败风险。",
     "无效Trigger": "检查无效或禁用的触发器，重点关注业务规则未执行和对象编译问题。",
     "失败的Job": "检查 Scheduler 与 DBMS_JOB 失败任务，重点关注连续失败、错误原因和业务遗漏。",
-    "Alert Log": "分析当前实例物理 Alert Log 的最近时间窗口，重点关注 ORA/TNS 错误、严重内部错误、重复告警及日志文件过大。",
+    "Alert Log": "按多行错误栈分析当前实例 Alert Log，识别 ORA/TNS/KUP 等错误、重复事件和伴随信息，给出中文含义、排查步骤与处理建议，并标注采集窗口和证据完整性。",
     "跟踪文件": "检查近期 trace 文件和大文件，重点关注异常持续产生、磁盘占用及对应故障线索。",
     "CDB/PDB": "核查多租户架构及 PDB 打开状态，重点关注未打开、受限模式和容器状态异常。",
     "RAC集群": "检查 RAC 各节点和实例状态，重点关注节点离线、实例不一致和集群可用性。",
@@ -69,7 +69,6 @@ CHECK_ITEM_EXPLANATIONS = {
     "Windows故障转移集群": "只读核查Windows集群节点、组、资源、网络、仲裁；未安装或未配置为INFO，查询失败为UNKNOWN，不执行切换。",
     "Oracle锁页权限与大页配置": "核查Windows Oracle服务账号锁页授权和ORA_LPENABLE/实例覆盖值；配置不等于运行中令牌或实际大页使用。",
     "Oracle Windows大页": "关联本地数据库实例、Windows服务及注册表大页配置；USE_LARGE_PAGES仅作参数参考，远程数据库不关联本地服务。",
-    "Oracle配置ACL": "检查Oracle网络配置及匹配Oracle Home注册表的潜在宽泛写权限；保存SID、ACL和文件时间。",
 }
 
 
