@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- 新增 Data Guard / Active Data Guard 角色识别与独立报告章节；覆盖保护模式、Redo 传输/应用延迟、MRP/RFS 进程、归档缺口、RAC Thread 序列进度、Standby Redo Log 和近 24 小时 DG 事件。物理备库 `MOUNTED` 现在按角色视为正常实例状态，`READ ONLY WITH APPLY` 标记为 ADG 实时查询运行特征（不作为许可证审计结论）。
 - 移除独立的 Oracle 配置 ACL 巡检项及 Windows 采集入口；旧采集包中的 oracle_config_acl.txt 与对应失败记录不再影响报告完整性，其余权限检查保留。
 
 - 4.4：Alert 离线诊断词典扩充至 5386 条（5357 个 ORA、24 个 TNS、5 个 KUP）。329 个高频词条提供精细中文诊断，其余有效 ORA 编号和短消息从 Oracle Database 21c 官方错误手册抽取，并按故障域提供低置信度通用排查；应用自定义 ORA-20000 至 ORA-20999 继续由应用解释。报告定位信息仅显示词典版本，不显示词条数量和阶段括注；大词典查询改为索引访问。

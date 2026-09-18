@@ -7,6 +7,7 @@
 - Windows Server 2012 R2 或更高版本。
 - Windows PowerShell 5.1。
 - Oracle Database 11g 至 23ai，目标 Oracle Home 包含 `sqlplus.exe` 和 `lsnrctl.exe`。
+- 数据库采集包含 Data Guard / Active Data Guard 角色、保护模式、Redo 传输与应用延迟、进程、归档缺口、每线程序列进度、Standby Redo Log 和最近 24 小时异常事件；所有检查均为只读。
 - 完整主机、Security 事件日志和 ACL 巡检建议使用管理员权限。
 - OS 数据库认证账号应属于本机 `ORA_DBA` 组。
 

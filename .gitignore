@@ -1,7 +1,38 @@
+# Python caches and local environments
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .venv/
-build/
-output/
-*.tar.gz
-*.tar.gz.sha256
+venv/
+.coverage
+htmlcov/
+
+# Build products and generated inspection reports
+/reporter/build/
+/reporter/dist/*
+!/reporter/dist/OracleReport.exe
+!/reporter/dist/OracleReport.exe.sha256
+/reporter/output/
+/collector-linux/output/
+/collector-windows/output/
+
+# Collected operational data and distribution archives
+db_check_*.tar.gz
+host_check_*.tar.gz
+db_check_*.zip
+host_check_*.zip
+/collector-linux-*.tar.gz
+
+# Local secrets and editor files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
+~$*

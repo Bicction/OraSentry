@@ -7,6 +7,7 @@ import re
 from typing import Dict, List, Optional, Tuple
 from parser.base import CheckResult, check_threshold, read_file, read_lines, generate_bar_chart, generate_data_table, parse_env_info
 from config import HOST_THRESHOLDS
+from parser.disk_capacity import assess_disk_capacity
 
 
 def parse_host(raw_dir: str) -> List[CheckResult]:
@@ -29,6 +30,8 @@ def parse_host(raw_dir: str) -> List[CheckResult]:
     results.append(_parse_network(host_dir))
     results.append(_parse_syslog(host_dir))
     results.extend(_parse_oracle_host_readiness(host_dir))
+    from parser.grid_parser import parse_grid_status
+    results.append(parse_grid_status(host_dir))
 
     return results
 
@@ -137,30 +140,16 @@ def _parse_disk_usage(host_dir: str) -> List[CheckResult]:
 
         disk_data.append((mount, usage, total, used, avail, avail_gb))
 
-        # 使用率阈值判定
-        status = check_threshold(usage, HOST_THRESHOLDS["disk_usage_warn"],
-                                 HOST_THRESHOLDS["disk_usage_crit"])
-
-        # 可用空间绝对值判定（取更严重的状态）
-        free_status = "OK"
-        if avail_gb > 0:
-            if avail_gb <= HOST_THRESHOLDS["disk_free_crit"]:
-                free_status = "CRIT"
-            elif avail_gb <= HOST_THRESHOLDS["disk_free_warn"]:
-                free_status = "WARN"
-
-        status_order = {"OK": 0, "WARN": 1, "CRIT": 2}
-        if status_order.get(free_status, 0) > status_order.get(status, 0):
-            status = free_status
+        status, free_status = assess_disk_capacity(usage, _parse_size_to_gb(total), avail_gb)
 
         suggestion = ""
         if status == "CRIT":
-            if avail_gb <= HOST_THRESHOLDS["disk_free_crit"]:
+            if free_status == "CRIT":
                 suggestion = f"磁盘 {mount} 可用空间仅 {avail_gb:.1f}GB，请立即清理或扩容"
             else:
                 suggestion = f"磁盘 {mount} 使用率已达 {usage}%，请立即清理或扩容"
         elif status == "WARN":
-            if avail_gb <= HOST_THRESHOLDS["disk_free_warn"]:
+            if free_status == "WARN":
                 suggestion = f"磁盘 {mount} 可用空间 {avail_gb:.1f}GB 偏低，建议关注"
             else:
                 suggestion = f"磁盘 {mount} 使用率 {usage}%，建议关注并清理"

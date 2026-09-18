@@ -77,6 +77,14 @@ ZONE_CONFIG = {
         "style_class": "db-style",
         "dot_class": "db",
     },
+    "dg": {
+        "icon": "&#8644;",
+        "title": "Data Guard / Active Data Guard",
+        "subtitle": "数据库角色、Redo传输、应用延迟、切换就绪度",
+        "sec_class": "dg",
+        "style_class": "dg-style",
+        "dot_class": "dg",
+    },
     "cdb": {
         "icon": "&#128203;",
         "title": "CDB/PDB管理",
@@ -298,6 +306,8 @@ def run_all_parsers(raw_dir: str, report_kind: str = "auto",
             results["cdb"] = db_data["cdb"]
         if db_data.get("rac"):
             results["rac"] = db_data["rac"]
+        if db_data.get("dg"):
+            results["dg"] = db_data["dg"]
 
     _raise_if_cancelled(cancel_check)
     if include_db and os.path.isdir(f"{raw_dir}/security"):
@@ -360,19 +370,15 @@ def generate_action_panel(results: Dict[str, List[CheckResult]]) -> str:
     """生成按严重度排序、可跳转的待处理事项面板。"""
     severity_order = {"UNKNOWN": 0, "CRIT": 1, "WARN": 2}
     actions = [
-        (index, category, item)
-        for index, (category, item) in enumerate(_iter_checks(results))
+        (index, category, item, anchor)
+        for index, (category, item, anchor) in enumerate(_iter_anchored_checks(results))
         if item.status in severity_order
     ]
     actions.sort(key=lambda row: (severity_order[row[2].status], row[0]))
 
-    if not actions:
-        return ""
-
-    items_html = ""
-    for _, category, item in actions:
+    items_html = "" if actions else '<p class="action-empty">未发现需要处理的巡检项</p>'
+    for _, category, item, anchor in actions:
         badge = generate_status_badge(item.status)
-        anchor = _make_anchor(category, item.name)
         suggestion = f" - {html.escape(str(item.suggestion))}" if item.suggestion else ""
         items_html += (
             f'<a class="action-item" href="#{anchor}">{badge}'
@@ -400,11 +406,45 @@ def _ordered_categories(results: Dict[str, List[CheckResult]]) -> List[str]:
     )
 
 
-def _iter_checks(results: Dict[str, List[CheckResult]]):
-    """以统一顺序遍历 (类别, 巡检项)。"""
+def _ordered_checks(items: List[CheckResult]) -> List[CheckResult]:
+    """One stable display order for the sidebar, contents and detail sections."""
+    def key(item):
+        if "概览" in item.name:
+            return (0, 0)
+        if item.name == "系统日志":
+            return (2, 0)
+        return (1, {"UNKNOWN": 0, "CRIT": 1, "WARN": 2, "OK": 3, "INFO": 4}.get(item.status, 3))
+    return sorted(items, key=key)
+
+
+def _checks_with_anchors(category, items):
+    """Assign distinct IDs even for repeated names or names with the same slug."""
+    ordered = _ordered_checks(items)
+    bases = [_make_anchor(category, item.name) for item in ordered]
+    reserved, used = set(bases), set()
+    for item, base in zip(ordered, bases):
+        anchor = base
+        suffix = 2
+        while anchor in used:
+            anchor = f"{base}-{suffix}"
+            suffix += 1
+            while anchor in reserved:
+                anchor = f"{base}-{suffix}"
+                suffix += 1
+        used.add(anchor)
+        yield item, anchor
+
+
+def _iter_anchored_checks(results):
     for category in _ordered_categories(results):
-        for item in results[category]:
-            yield category, item
+        for item, anchor in _checks_with_anchors(category, results[category]):
+            yield category, item, anchor
+
+
+def _iter_checks(results: Dict[str, List[CheckResult]]):
+    """Traverse checks in the same order used by the visible report."""
+    for category, item, _ in _iter_anchored_checks(results):
+        yield category, item
 
 
 def _make_anchor(category: str, name: str) -> str:
@@ -417,8 +457,7 @@ def _make_anchor(category: str, name: str) -> str:
 def generate_toc_section(results: Dict[str, List[CheckResult]]) -> str:
     """生成巡检项目目录，带状态圆点和可点击跳转链接"""
     toc_items = []
-    for category, item in _iter_checks(results):
-        anchor = _make_anchor(category, item.name)
+    for category, item, anchor in _iter_anchored_checks(results):
         dot_class = f"dot-{item.status.lower()}"
         toc_items.append(
             f'<a class="toc-item" href="#{anchor}">'
@@ -446,8 +485,7 @@ def generate_sidebar_nav(results: Dict[str, List[CheckResult]]) -> str:
     for category in _ordered_categories(results):
         zone = ZONE_CONFIG.get(category, ZONE_CONFIG["host"])
         item_links = []
-        for item in results[category]:
-            anchor = _make_anchor(category, item.name)
+        for item, anchor in _checks_with_anchors(category, results[category]):
             item_links.append(
                 f'<a class="nav-link nav-check" href="#{anchor}" title="{html.escape(str(item.name))}">'
                 f'<span class="dot {item.status.lower()}"></span>'
@@ -471,16 +509,6 @@ def generate_category_section(category: str, items: List[CheckResult]) -> str:
     """生成单个巡检类别的详细内容"""
     zone = ZONE_CONFIG.get(category, ZONE_CONFIG["host"])
 
-    # 排序: 概览项置顶，问题项(CRIT/WARN)次之，正常项最后，系统日志固定末尾
-    def sort_key(x):
-        if "概览" in x.name:
-            return (0, 0)
-        if x.name == "系统日志":
-            return (2, 0)
-        status_order = {"UNKNOWN": 0.9, "CRIT": 1, "WARN": 1.1, "INFO": 1.6, "OK": 1.5}
-        return (1, status_order.get(x.status, 1.5))
-    sorted_items = sorted(items, key=sort_key)
-
     section_id = f"section-{category}"
 
     header = f"""
@@ -494,9 +522,9 @@ def generate_category_section(category: str, items: List[CheckResult]) -> str:
         </div>"""
 
     if category == "host":
-        content = _generate_host_cards(category, sorted_items)
+        content = _generate_host_cards(category, items)
     else:
-        content = _generate_table_wrap(category, sorted_items, zone["style_class"])
+        content = _generate_table_wrap(category, items, zone["style_class"])
 
     return header + content + "</section>"
 
@@ -551,10 +579,9 @@ def generate_report_summary_chapter(content: Optional[InspectionSummary] = None)
 def _generate_host_cards(category: str, items: List[CheckResult]) -> str:
     """主机巡检使用卡片网格布局"""
     cards = ""
-    for item in items:
+    for item, anchor in _checks_with_anchors(category, items):
         status_lower = item.status.lower()
         badge = generate_status_badge(item.status)
-        anchor = _make_anchor(category, item.name)
         explanation = html.escape(get_check_explanation(item.name))
         suggestion_html = f'<div class="cc-suggestion">{html.escape(str(item.suggestion))}</div>' if item.suggestion else ""
         extra_html = (
@@ -581,9 +608,8 @@ def _generate_host_cards(category: str, items: List[CheckResult]) -> str:
 def _generate_table_wrap(category: str, items: List[CheckResult], style_class: str) -> str:
     """数据库/CDB/RAC/安全巡检使用表格布局"""
     rows = ""
-    for item in items:
+    for item, anchor in _checks_with_anchors(category, items):
         badge = generate_status_badge(item.status)
-        anchor = _make_anchor(category, item.name)
         explanation = html.escape(get_check_explanation(item.name))
         suggestion_html = f'<div class="cc-suggestion">{html.escape(str(item.suggestion))}</div>' if item.suggestion else ""
         extra_html = (
@@ -641,12 +667,8 @@ def generate_report(results: Dict[str, List[CheckResult]], env_info: dict,
 
     # 各类别详情
     detail_html = ""
-    for category in CATEGORY_ORDER:
-        if category in results:
-            detail_html += generate_category_section(category, results[category])
-    for category in results:
-        if category not in CATEGORY_ORDER:
-            detail_html += generate_category_section(category, results[category])
+    for category in _ordered_categories(results):
+        detail_html += generate_category_section(category, results[category])
     inspection_summary = (
         build_inspection_summary(results, counts, health_score)
         if generate_summary_content else None
@@ -655,7 +677,7 @@ def generate_report(results: Dict[str, List[CheckResult]], env_info: dict,
 
     # 根据巡检类别确定报告标题（从配置文件读取）
     has_host = "host" in results
-    has_db = any(category in results for category in ("db", "cdb", "rac", "security"))
+    has_db = any(category in results for category in ("db", "dg", "cdb", "rac", "security"))
     if has_db:
         report_title = REPORT_CONFIG["title_db"]
     elif has_host:
@@ -1108,7 +1130,7 @@ def build_reports(input_paths: List[str], output_file: str = None,
             raise ReportBuildError(details)
         oracle_reports = [
             report for report in batch.reports
-            if any(category in report.results for category in ("db", "cdb", "rac", "security"))
+            if any(category in report.results for category in ("db", "dg", "cdb", "rac", "security"))
         ]
         if not batch.cancelled and write_summary and len(oracle_reports) >= 2:
             from summary_gen import generate_summary_reports

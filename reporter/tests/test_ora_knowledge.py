@@ -1,4 +1,5 @@
 import copy
+import gzip
 import json
 import sys
 import tempfile
@@ -11,15 +12,22 @@ from ora_knowledge import CatalogError, catalog_metadata, load_catalog, lookup_c
 
 
 class OraKnowledgeTests(unittest.TestCase):
+    def test_partition_extent_error_has_specific_guidance(self):
+        record = lookup_code('ORA-01688')
+        self.assertTrue(record['known'])
+        self.assertEqual(record['severity'], 'CRIT')
+        self.assertEqual(record['diagnostic_level'], 'curated')
+        self.assertIn('表分区', record['title'])
+        self.assertIn('DBA_TAB_PARTITIONS', ''.join(record['checks']))
     def test_catalog_metadata_is_lightweight_and_complete(self):
         metadata = catalog_metadata()
-        self.assertEqual(metadata["catalog_version"], "2026.09.07-v3")
-        self.assertEqual(metadata["entry_count"], 5386)
+        self.assertEqual(metadata["catalog_version"], "2026.09.17-v3.1")
+        self.assertEqual(metadata["entry_count"], 5387)
         self.assertNotIn("entries", metadata)
 
     def test_catalog_is_self_describing_and_returns_owned_records(self):
         catalog = load_catalog()
-        self.assertEqual(len(catalog["entries"]), 5386)
+        self.assertEqual(len(catalog["entries"]), 5387)
         self.assertGreaterEqual(sum(e["code"].startswith("ORA-") for e in catalog["entries"]), 5000)
         self.assertIn("第三版", catalog["coverage_note"])
         record = lookup_code("ora-600", "19.18.0.0.0")
@@ -31,7 +39,7 @@ class OraKnowledgeTests(unittest.TestCase):
         record["checks"].clear()
         catalog["entries"].clear()
         self.assertTrue(lookup_code("ORA-00600")["checks"])
-        self.assertEqual(len(load_catalog()["entries"]), 5386)
+        self.assertEqual(len(load_catalog()["entries"]), 5387)
 
     def test_domain_entries_keep_official_message_and_safe_diagnosis(self):
         record = lookup_code("ORA-00017", "21c")
@@ -82,6 +90,23 @@ class OraKnowledgeTests(unittest.TestCase):
         for value in invalids:
             with self.assertRaises(CatalogError):
                 _validate_catalog(value)
+
+    def test_compressed_frozen_catalog_matches_source_and_rejects_corruption(self):
+        catalog = load_catalog()
+        with tempfile.TemporaryDirectory() as directory:
+            resource = Path(directory) / "resources/ora/catalog.json.gz"
+            resource.parent.mkdir(parents=True)
+            payload = json.dumps(catalog, ensure_ascii=False).encode("utf-8")
+            resource.write_bytes(gzip.compress(payload, mtime=0))
+            with patch.object(sys, "frozen", True, create=True), patch.object(sys, "_MEIPASS", directory, create=True):
+                self.assertEqual(load_catalog(), catalog)
+                self.assertTrue(lookup_code("ORA-00600")["known"])
+                resource.write_bytes(b"broken gzip")
+                with self.assertRaises(CatalogError):
+                    load_catalog()
+                resource.write_bytes(gzip.compress(payload)[:16])
+                with self.assertRaises(CatalogError):
+                    load_catalog()
 
 
 if __name__ == "__main__":

@@ -243,7 +243,7 @@ def _finding(event, entry, variant, confidence, source, entries):
     objects = "|".join(sorted({a or b for a, b in paths}))
     # Storage/object parameters are meaningful even when not quoted, including
     # ASM member names and tablespace names. Do not merge distinct resources.
-    if entry["code"] in ("ORA-00313", "ORA-01110", "ORA-01652", "ORA-01653", "ORA-01654"):
+    if entry["code"] in ("ORA-00313", "ORA-01110", "ORA-01652", "ORA-01653", "ORA-01654", "ORA-01688"):
         objects += "|" + "|".join(re.sub(r"\s+", " ", s.strip()) for s in code_lines if entry["code"] in s.upper() or "ORA-00312" in s.upper() or "ORA-01110" in s.upper())
     if not entry.get("known") and event.codes:
         objects += "|" + next((s[:300] for s in code_lines if entry["code"] in s.upper()), "")

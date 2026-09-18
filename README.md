@@ -1,41 +1,30 @@
-# OraSentry v4.3
+### 2026-09-17 Word 性能与主机巡检修复
 
-Oracle 主机、数据库与安全巡检工具。项目采用离线两段式架构：Linux Oracle
-服务器运行 `collector-linux`，Windows Oracle 服务器运行 `collector-windows` 生成采集包，Windows 或 Python 环境运行 `reporter`
-生成 HTML、DOCX 和多系统汇总报告。
+- Word 大表格复用格式模板，全文字体按 XML 一次遍历；表格与字体处理中可取消。默认不再启动本机 Word 等待分页，目录仍可点击跳转，需要页码时在 Word 中全选按 F9 更新。确需预先分页可将 `REPORT_CONFIG.word_cache_page_numbers` 改为 `True`。
+- ORA 词典 `2026.09.17-v3.1` 增加 ORA-01688 表分区扩展失败专项诊断，按不同分区和表空间保留独立事件。
+- Linux 主机采集检测 grid 用户，由 root 切换到 grid 登录环境执行 `crsctl check crs`、`crsctl check cluster -all`、`crsctl stat res -t` 与 `olsnodes -n -s`。每条命令限时20秒，切换和整个检查限时95秒；缺失用户、权限不足、失败和超时均明确记录。主机报告新增 Grid/RAC 运行状态。
+- Linux/Windows 磁盘可用空间阈值随总容量缩放：警告取 10GB 与总容量20% 的较小值，严重取 5GB 与总容量10% 的较小值，百分比随使用率配置联动。5GB 分区剩余4GB为正常；80%/90%使用率仍分别警告/严重。
 
-## v4.3 重点
+### 2026-09-17 数据文件完整展示与 AWR 空采集修复
 
-- 新增原生 Windows PowerShell 5.1 Collector，覆盖 Windows 主机性能、服务、事件日志、ACL、Oracle 数据库与安全巡检。
-- Linux 采集端更名为 `collector-linux`，统一入口为 `OraSentry.sh`；Windows 可双击 `开始巡检.cmd`，同时保留 `OraSentry.ps1` 命令行入口。
-- Linux 与 Windows 均生成 `host_check_<hostname>_<timestamp>.tar.gz` 和 `db_check_<SID>_<timestamp>.tar.gz`。
-- 采集协议升级为 `schema_version=4.3`，通过 `platform=linux/windows` 分流；报告端继续兼容所有 4.x 包。
-- 禁止在配置中保存 `DB_USER/DB_PASS` 明文认证，支持 OS 认证、运行时隐藏输入和 Oracle Wallet。
-- SQL 文本和 AWR 采集默认关闭，需在对应平台配置中显式启用。
-- 打包阶段只生成 tar.gz 采集包，并将其标记为机密运维数据。
-- 报告端自动清理解压临时目录，不删除用户已有 JSON 或 `.gitkeep`。
-- 主机包与数据库包始终分别生成报告，Oracle 报告不包含主机巡检项。
-- 健康评分采用适用检查项归一化加权；风险状态与数据可信度独立展示。
-- Python 与 PyInstaller 依赖固定版本，Windows EXE 带版本资源并提供签名建议。
-- HTML/Word 巡检项均展示用途说明；Word 静态目录带准确页码且不依赖外部域更新。
+- PDB 数据文件明细列出全部文件，取消每个 PDB 最多 10 条及“更多”占位行。
+- Linux/Windows 的 AWR 系统统计和等待事件不再固定筛选 CON_ID=0；12c+ 保留实际 CON_ID，11g 输出范围 0。解析优先选取两个快照共有的全库范围；仅根容器可用时明确标为 CDB$ROOT，不代表业务 PDB，不跨范围补齐或汇总。
+- 系统统计空文件显示采集缺失原因，不逐项刷出缺失计数，不因缺失而推荐高负载 SQL；空等待事件不再解释成零等待。部分指标缺失会列出对应快照。
+- 现有采集包无法恢复缺失或已舍入的精确计数，需更新采集器后重新采集。SQL 本地验证涵盖两平台、11g/12c+ 结构和容器范围；现场 Oracle 执行结果仍需重新采集确认。
 
-## 快速入口
+### 2026-09-17 CDB/PDB 表空间展示简化
 
-- Linux 采集端：[collector-linux/README.md](collector-linux/README.md)
-- Windows 采集端：[collector-windows/README.md](collector-windows/README.md)
-- 报告端说明：[reporter/README.md](reporter/README.md)
-- v4.3 升级说明：[doc/MIGRATION-v4.3.md](doc/MIGRATION-v4.3.md)
-- v4.2 升级说明：[doc/MIGRATION-v4.2.md](doc/MIGRATION-v4.2.md)
-- v4.0 升级说明：参见 [doc/CHANGELOG.md](doc/CHANGELOG.md) 中的 4.1.0 记录
-- 安全边界：[doc/SECURITY.md](doc/SECURITY.md)
-- 变更记录：[doc/CHANGELOG.md](doc/CHANGELOG.md)
+- CDB/PDB 表空间及临时表空间复用数据库巡检“表空间使用概览”：使用率条形图、GB 容量明细、最大使用率降序排列。
+- 明细保留容器名称以区分同名表空间，去掉 CON_ID、逐行判定和说明列；共享存储说明合并显示，异常建议和采集缺失提示保留。
+- 兼容 SQL*Plus 的 AUT 自动扩展列名，HTML 和 Word 使用同一份概览数据。
 
-## 验证
+### 2026-09-16 PDB 与 AWR 巡检修正
 
-```powershell
-python -m unittest discover -s collector-linux\tests -v
-python -m unittest discover -s collector-windows\tests -v
-python -m unittest discover -s reporter\tests -v
-```
-
-Linux 上的 `collector-linux` 测试会额外执行所有 Shell 文件的 `bash -n` 语法检查；Windows 测试会校验 PowerShell 语法、UTF-8 BOM 和原生 tar.gz 兼容性。
+- CDB/PDB 表空间按 CON_ID 隔离：永久、TEMP、UNDO 分开解释，展示当前分配量、已使用量和文件扩展上限。ASM usable_file_mb 作为共享存储余量展示，不能重复计入每个 PDB；文件系统或不可获取的余量明确标注未核实。
+- PDB 补采业务对象/索引（含分区）、统计信息、失败作业、账号、RAC 打开状态、服务、会话阻塞、事务持续时间、临时段占用和 UNDO 错误。无法读取、未打开或版本不支持均明确说明；物理备库维护建议指向主库。
+- 数据文件 USER_BYTES 更名为可用数据区，不再误称已用空间。
+- AWR v2 保留完整整数精度，选取本 DBID/本实例最近两个完整快照，按启动时间校验。系统统计、等待事件及 SQL 保留 CON_ID；11g 使用非 CDB 范围。等待事件使用同一容器范围的区间差值。
+- 缓冲区命中率采用缓存专用计数。缺失、回退、跨重启、越界、旧包精度不足均不产生数据库性能严重告警；本地累计统计与 AWR 区间统计分开标注。默认90%参考线、80%重点关注线，低比例最高提醒，不能仅据此扩容。
+- 解析/执行比例与硬解析占比分开判断；关联同实例、同快照 Top SQL 的解析、加载、失效、子游标和物理读，明确候选证据而非断言根因。阈值及最小样本量在 reporter/src/config.py。
+- 旧包不能恢复已舍入计数或新增 PDB 明细，需新版采集器补采。备库 AWR 历史来源未确认时不作为本地性能证据。AWR 仍遵循原有配置开关。
+- 不连接生产数据库执行维护。新增 SQL 的在线执行需要现场重新采集验证；本地验证覆盖协议、构造场景、历史实际包与报告生成。

@@ -76,5 +76,37 @@ host_collect() {
     collect_optional_cmd "${d}/selinux.txt" "getenforce"
     collect_optional_cmd "${d}/os_release.txt" "cat /etc/os-release"
 
+    # Grid commands must run with the Grid owner's login environment.
+    collect_grid_rac "${d}"
+
     log_info "========== 主机数据采集完成 =========="
+}
+
+collect_grid_rac() {
+    local d="$1" output_file="$1/grid_rac.txt" rc=0
+    if ! id grid >/dev/null 2>&1; then
+        printf 'GRID_COLLECTION=SKIPPED\nGRID_REASON=本机未发现grid用户\n' > "${output_file}"
+        record_collection 'grid_rac.txt' 'OPTIONAL_COMMAND' 'SKIPPED' '0' '本机未发现grid用户'
+        return 0
+    fi
+    if ! command -v timeout >/dev/null 2>&1; then
+        printf 'GRID_COLLECTION=FAILED\nGRID_REASON=缺少timeout，无法执行有时限的Grid检查\n' > "${output_file}"
+        rc=1
+    elif [[ "$(id -un)" == "grid" ]]; then
+        timeout -k 3s 95s /bin/bash -s < "${COLLECT_DIR}/lib/grid_check.sh" > "${output_file}" 2>&1 || rc=$?
+    elif [[ "$(id -u)" -eq 0 ]]; then
+        # Open the script as root and pass it through stdin, so grid need not
+        # have access to a collector installed under /root. Output stays root-owned.
+        timeout -k 3s 95s su - grid -s /bin/bash -c 'exec /bin/bash -s' < "${COLLECT_DIR}/lib/grid_check.sh" > "${output_file}" 2>&1 || rc=$?
+    else
+        printf 'GRID_COLLECTION=FAILED\nGRID_REASON=发现grid用户，但当前用户无权切换；请使用root运行主机巡检\n' > "${output_file}"
+        rc=1
+    fi
+    if [[ "${rc}" -ne 0 ]]; then
+        printf '\nGRID_COLLECTION=FAILED\nGRID_EXIT_CODE=%s\n' "${rc}" >> "${output_file}"
+        record_collection 'grid_rac.txt' 'OPTIONAL_COMMAND' 'WARN' "${rc}" 'Grid检查未完整执行，详见grid_rac.txt'
+    else
+        record_collection 'grid_rac.txt' 'OPTIONAL_COMMAND' 'OK' '0' ''
+    fi
+    return 0
 }

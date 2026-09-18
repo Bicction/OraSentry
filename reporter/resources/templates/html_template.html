@@ -24,6 +24,8 @@
             --db-light: #ede9fe;
             --cdb: #0891b2;
             --cdb-light: #ecfeff;
+            --dg: #c2410c;
+            --dg-light: #fff7ed;
             --rac: #db2777;
             --rac-light: #fce7f3;
             --sec: #d97706;
@@ -120,6 +122,7 @@
         .nav-link .dot.host { background: var(--host); }
         .nav-link .dot.db { background: var(--db); }
         .nav-link .dot.cdb { background: var(--cdb); }
+        .nav-link .dot.dg { background: var(--dg); }
         .nav-link .dot.rac { background: var(--rac); }
         .nav-link .dot.sec { background: var(--sec); }
         .nav-link .dot.ok { background: var(--ok); }
@@ -314,6 +317,7 @@
         .section-header.host .sec-icon { background: var(--host); }
         .section-header.db .sec-icon { background: var(--db); }
         .section-header.cdb .sec-icon { background: var(--cdb); }
+        .section-header.dg .sec-icon { background: var(--dg); }
         .section-header.rac .sec-icon { background: var(--rac); }
         .section-header.sec .sec-icon { background: var(--sec); }
         .sec-title { font-size: 16px; font-weight: 600; }
@@ -418,6 +422,7 @@
         .table-wrap.host-style .table-wrap-header { background: var(--host-light); color: var(--host); }
         .table-wrap.db-style .table-wrap-header { background: var(--db-light); color: var(--db); }
         .table-wrap.cdb-style .table-wrap-header { background: var(--cdb-light); color: var(--cdb); }
+        .table-wrap.dg-style .table-wrap-header { background: var(--dg-light); color: var(--dg); }
         .table-wrap.rac-style .table-wrap-header { background: var(--rac-light); color: var(--rac); }
         .table-wrap.sec-style .table-wrap-header { background: var(--sec-light); color: var(--sec); }
 
@@ -709,41 +714,121 @@
                 });
             });
 
+            var sidebar = document.querySelector('.sidebar');
             var navLinks = Array.from(document.querySelectorAll('.sidebar .nav-link[href^="#"]'));
-            var targets = navLinks.map(function(link) {
-                return document.getElementById(link.getAttribute('href').slice(1));
-            }).filter(Boolean);
+            function fragmentId(hash) {
+                try { return decodeURIComponent(hash.replace(/^#/, '')); }
+                catch (error) { return hash.replace(/^#/, ''); }
+            }
+            var targets = [];
+            navLinks.forEach(function(link) {
+                var target = document.getElementById(fragmentId(link.getAttribute('href')));
+                if (target && targets.indexOf(target) === -1) { targets.push(target); }
+            });
+            targets.sort(function(a, b) {
+                return a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+            });
+            var activeId = null;
+            var pinnedId = null;
+            var pendingFrame = false;
 
             function activateNavigation(id) {
+                if (activeId === id) { return; }
+                activeId = id;
+                var selectedLink = null;
                 navLinks.forEach(function(link) {
-                    var active = link.getAttribute('href') === '#' + id;
+                    var active = fragmentId(link.getAttribute('href')) === id;
                     link.classList.toggle('active', active);
                     if (active) {
-                        link.scrollIntoView({block: 'nearest'});
+                        link.setAttribute('aria-current', 'location');
+                        selectedLink = selectedLink || link;
+                    } else {
+                        link.removeAttribute('aria-current');
                     }
                 });
+                // Scroll only the fixed menu. scrollIntoView can also move the report.
+                if (sidebar && selectedLink && sidebar.clientHeight) {
+                    var menu = sidebar.getBoundingClientRect();
+                    var linkRect = selectedLink.getBoundingClientRect();
+                    if (linkRect.top < menu.top + 8) {
+                        sidebar.scrollTop += linkRect.top - menu.top - 8;
+                    } else if (linkRect.bottom > menu.bottom - 8) {
+                        sidebar.scrollTop += linkRect.bottom - menu.bottom + 8;
+                    }
+                }
             }
 
-            navLinks.forEach(function(link) {
-                link.addEventListener('click', function() {
-                    activateNavigation(this.getAttribute('href').slice(1));
-                });
-            });
-
-            if ('IntersectionObserver' in window) {
-                var observer = new IntersectionObserver(function(entries) {
-                    var visible = entries
-                        .filter(function(entry) { return entry.isIntersecting; })
-                        .sort(function(a, b) { return a.boundingClientRect.top - b.boundingClientRect.top; });
-                    if (visible.length) {
-                        activateNavigation(visible[0].target.id);
+            function updateNavigation() {
+                pendingFrame = false;
+                if (!targets.length) { return; }
+                var pinned = pinnedId && document.getElementById(pinnedId);
+                if (pinned) {
+                    var pinnedRect = pinned.getBoundingClientRect();
+                    if (pinnedRect.bottom > 0 && pinnedRect.top < window.innerHeight) {
+                        activateNavigation(pinnedId);
+                        return;
                     }
-                }, {rootMargin: '-12% 0px -72% 0px', threshold: 0});
+                    pinnedId = null;
+                }
+                var line = Math.min(120, window.innerHeight * 0.15);
+                var current = targets[0];
+                var nearestTop = -Infinity;
+                targets.forEach(function(target) {
+                    var top = target.getBoundingClientRect().top;
+                    // Cards sharing a grid row keep their first visible entry active.
+                    if (top <= line && top > nearestTop) {
+                        current = target;
+                        nearestTop = top;
+                    }
+                });
+                if (window.scrollY > 0 && window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 2) {
+                    current = targets[targets.length - 1];
+                }
+                activateNavigation(current.id);
+            }
+
+            function scheduleNavigation() {
+                if (!pendingFrame) {
+                    pendingFrame = true;
+                    window.requestAnimationFrame(updateNavigation);
+                }
+            }
+
+            function followFragment(hash) {
+                var id = fragmentId(hash);
+                var target = document.getElementById(id);
+                pinnedId = target && targets.indexOf(target) !== -1 ? id : null;
+                if (pinnedId) { activateNavigation(pinnedId); }
+                scheduleNavigation();
+            }
+
+            // Contents and action links must select the same entry as menu clicks.
+            document.addEventListener('click', function(event) {
+                var link = event.target.closest && event.target.closest('a[href^="#"]');
+                if (link) { followFragment(link.getAttribute('href')); }
+            });
+            function releasePinnedNavigation() {
+                pinnedId = null;
+                scheduleNavigation();
+            }
+            document.addEventListener('wheel', releasePinnedNavigation, {passive: true});
+            document.addEventListener('touchmove', releasePinnedNavigation, {passive: true});
+            document.addEventListener('pointerdown', releasePinnedNavigation);
+            document.addEventListener('keydown', function(event) {
+                if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].indexOf(event.key) !== -1) {
+                    releasePinnedNavigation();
+                }
+            });
+            window.addEventListener('scroll', scheduleNavigation, {passive: true});
+            window.addEventListener('resize', scheduleNavigation);
+            window.addEventListener('hashchange', function() { followFragment(window.location.hash); });
+            if ('IntersectionObserver' in window) {
+                // Use all target positions, not only the entries changed by this callback.
+                var observer = new IntersectionObserver(scheduleNavigation, {threshold: 0});
                 targets.forEach(function(target) { observer.observe(target); });
             }
+            followFragment(window.location.hash);
 
-            var initialId = window.location.hash.slice(1) || 'overview';
-            activateNavigation(initialId);
         });
     </script>
 </head>

@@ -3,8 +3,10 @@
 数据库巡检数据解析器
 解析 Shell 采集的数据库原始数据，进行阈值判定
 """
+import os
 import re
 from collections import Counter
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import List
 from parser.base import (
@@ -19,6 +21,7 @@ from parser.base import (
     parse_env_info,
 )
 from config import DB_THRESHOLDS
+from parser.tablespace_view import effective_usage, render_tablespace_overview
 
 
 from typing import List, Dict
@@ -109,7 +112,11 @@ def parse_db(raw_dir: str) -> Dict[str, List[CheckResult]]:
     db_results.append(_parse_trace_files(db_dir))
 
     cdb_results = _parse_cdb_info(db_dir)
+    if any(r.name == "CDB/PDB" and "非CDB" not in r.value for r in cdb_results):
+        from parser.advanced_checks import parse_pdb
+        cdb_results.extend(parse_pdb(db_dir, _pdb_database_role(db_dir)))
     rac_results = _parse_rac_info(db_dir)
+    dataguard_results = _parse_dataguard(db_dir)
 
     # CDB: 有实际PDB数据时才返回（排除"非CDB"和"CDB但无PDB"的情况）
     has_cdb = any(r.name == "CDB/PDB" and "非CDB" not in r.value for r in cdb_results)
@@ -120,6 +127,7 @@ def parse_db(raw_dir: str) -> Dict[str, List[CheckResult]]:
         "db": db_results,
         "cdb": cdb_results if has_cdb else [],
         "rac": rac_results if has_rac else [],
+        "dg": dataguard_results,
     }
 
 
@@ -196,17 +204,687 @@ def _parse_database_resilience(db_dir: str) -> List[CheckResult]:
                                "立即核查 RMAN VALIDATE、备份可用性并制定恢复方案" if integrity_count else "",
                                extra_html=integ_extra))
 
-    dg_rows = _data_rows(read_file(f"{db_dir}/dataguard_dest_status.txt"), ("DEST_ID",))
-    gap_rows = _data_rows(read_file(f"{db_dir}/archive_gap.txt"), ("THREAD#",))
-    dg_errors = [r for r in dg_rows if any("ORA-" in x.upper() for x in r)]
-    dg_status = "CRIT" if gap_rows else ("WARN" if dg_errors else "OK")
-    dg_extra = generate_data_table(["DEST", "状态", "类型", "数据库模式", "恢复模式", "目标", "错误", "线程", "序列"], dg_rows) if dg_rows else ""
+    return results
+
+
+_DG_STATUS_ORDER = {"INFO": 0, "OK": 1, "UNKNOWN": 2, "WARN": 3, "CRIT": 4}
+
+
+def _dg_worst(statuses, default="OK") -> str:
+    return max(statuses or [default], key=lambda value: _DG_STATUS_ORDER.get(value, 0))
+
+
+def _parse_dg_interval_seconds(value):
+    """解析 V$DATAGUARD_STATS 的 +DD HH:MI:SS[.FF] 间隔。"""
+    text = str(value or "").strip()
+    if not text or text.upper() in ("UNKNOWN", "N/A", "NULL"):
+        return None
+    match = re.match(r"^([+-])?(\d+)\s+(\d{1,2}):(\d{2}):(\d{2}(?:\.\d+)?)$", text)
+    if match:
+        seconds = (int(match.group(2)) * 86400 + int(match.group(3)) * 3600
+                   + int(match.group(4)) * 60 + float(match.group(5)))
+        return -seconds if match.group(1) == "-" else seconds
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _format_dg_duration(seconds) -> str:
+    if seconds is None:
+        return "未知"
+    seconds = max(0, int(round(seconds)))
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}天")
+    if hours or days:
+        parts.append(f"{hours}小时")
+    if minutes or hours or days:
+        parts.append(f"{minutes}分")
+    parts.append(f"{seconds}秒")
+    return "".join(parts)
+
+
+def _parse_dg_datetime(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    text = re.sub(r"\s+[A-Z]{2,5}$", "", text)
+    formats = (
+        "%m/%d/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S",
+        "%d-%b-%Y %H:%M:%S", "%d-%b-%y %H:%M:%S",
+    )
+    for fmt in formats:
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _dataguard_identity(db_dir: str):
+    rows = _data_rows(read_file(f"{db_dir}/dataguard_identity.txt"), ("NAME",))
+    if rows and len(rows[0]) >= 10:
+        row = rows[0]
+        return {
+            "name": row[0], "unique_name": row[1], "role": row[2].upper(),
+            "open_mode": row[3].upper(), "log_mode": row[4].upper(),
+            "force_logging": row[5].upper(), "flashback": row[6].upper(),
+            "protection_mode": row[7].upper(), "protection_level": row[8].upper(),
+            "switchover": row[9].upper(), "current": True,
+        }
+
+    db_rows = _data_rows(read_file(f"{db_dir}/database_status.txt"), ("NAME",))
+    if not db_rows or len(db_rows[0]) < 3:
+        return None
+    db_row = db_rows[0]
+    resilience_rows = [
+        row for row in _parse_pipe_table(read_file(f"{db_dir}/db_resilience.txt"))
+        if len(row) >= 7 and row[0].upper() in ("YES", "NO")
+    ]
+    resilience = resilience_rows[0] if resilience_rows else [""] * 7
+    return {
+        "name": db_row[0], "unique_name": db_row[0], "role": db_row[2].upper(),
+        "open_mode": db_row[1].upper(), "log_mode": db_row[4].upper() if len(db_row) > 4 else "",
+        "force_logging": resilience[0].upper(), "flashback": resilience[1].upper(),
+        "protection_mode": resilience[4].upper(), "protection_level": resilience[5].upper(),
+        "switchover": resilience[6].upper(), "current": False,
+    }
+
+
+def _dataguard_dest_rows(db_dir: str):
+    health_path = f"{db_dir}/dataguard_dest_health.txt"
+    health_content = read_file(health_path)
+    if os.path.isfile(health_path) and "ORA-" not in health_content.upper():
+        rows = _data_rows(health_content, ("DEST_ID",))
+        return [(row + [""] * 15)[:15] for row in rows], True, False
+
+    legacy_path = f"{db_dir}/dataguard_dest_status.txt"
+    legacy_content = read_file(legacy_path)
+    legacy = _data_rows(legacy_content, ("DEST_ID",))
+    rows = []
+    for row in legacy:
+        if row and re.match(r"^(?:ORA|SP2|TNS|LRM)-\d+", row[0], re.IGNORECASE):
+            continue
+        row = (row + [""] * 9)[:9]
+        rows.append(row[:5] + ["", row[5], "", "", "", row[6], row[7], row[8], "", ""])
+    problem = not os.path.isfile(legacy_path) or bool(re.search(r"^(?:ORA|SP2|TNS|LRM)-\d+", legacy_content, re.MULTILINE | re.IGNORECASE))
+    return rows, False, problem
+
+
+def _dg_remote_destinations(rows):
+    remote_types = {"PHYSICAL", "LOGICAL", "FAR SYNC", "STANDBY"}
+    return [row for row in rows if row[2].strip().upper() in remote_types]
+
+
+def _dg_deployment_label(role: str, open_mode: str, has_remote: bool) -> str:
+    if role == "PRIMARY":
+        return "Data Guard主库" if has_remote else "普通主库（未识别Data Guard）"
+    if role == "PHYSICAL STANDBY":
+        if open_mode == "READ ONLY WITH APPLY":
+            return "Active Data Guard实时查询"
+        if open_mode == "READ ONLY":
+            return "物理备库（只读、未实时应用）"
+        return "Data Guard物理备库"
+    return {
+        "LOGICAL STANDBY": "Data Guard逻辑备库",
+        "SNAPSHOT STANDBY": "Data Guard快照备库",
+        "FAR SYNC": "Data Guard Far Sync",
+    }.get(role, f"Data Guard角色：{role or '未知'}")
+
+
+def _dg_lag_status(seconds) -> str:
+    if seconds is None:
+        return "UNKNOWN"
+    if seconds >= DB_THRESHOLDS["dataguard_lag_crit_seconds"]:
+        return "CRIT"
+    if seconds >= DB_THRESHOLDS["dataguard_lag_warn_seconds"]:
+        return "WARN"
+    return "OK"
+
+
+def _dg_query_failed(content):
+    return bool(re.search(r"(?:ORA|SP2|TNS|LRM)-\d+", content, re.IGNORECASE))
+
+
+def _dg_apply_process(row):
+    # Match only the process role, never a client name or unrelated action.
+    return bool(row and re.search(
+        r"\b(?:MRP\d*|APPLY|LOGMERGER|MANAGED RECOVERY)\b", row[0], re.IGNORECASE
+    ))
+
+
+def _parse_physical_dg_apply(db_dir, identity):
+    """Assess physical standby apply using one package's cluster evidence."""
+    def content(name):
+        return read_file(f"{db_dir}/{name}.txt")
+
+    local_text = content("dataguard_process")
+    local_rows = [r for r in _parse_pipe_table(local_text) if len(r) == 5
+                  and r[0].upper() not in ("PROCESS_ROLE", "PROCESS", "PROCESS_R")]
+    local_apply = [r for r in local_rows if _dg_apply_process(r)] if not _dg_query_failed(local_text) else []
+    ctx_text = content("dataguard_context")
+    ctx_rows = [r for r in _parse_pipe_table(ctx_text) if len(r) == 5 and r[0].isdigit()]
+    ctx = ctx_rows[0] if len(ctx_rows) == 1 and not _dg_query_failed(ctx_text) else None
+    current_id = ctx[0] if ctx else None
+    nodes = [r for r in _parse_pipe_table(content("rac_nodes")) if len(r) >= 4 and r[0].isdigit()]
+    if not nodes:
+        nodes = [r for r in _parse_pipe_table(content("instance_status")) if len(r) >= 4 and r[0].isdigit()]
+    node_ids = {r[0] for r in nodes}
+    is_rac = len(node_ids) > 1 or bool(ctx and ctx[3].upper() == "TRUE")
+    cluster_text = content("dataguard_cluster_process")
+    cluster_rows = [r for r in _parse_pipe_table(cluster_text) if len(r) == 9 and r[0].isdigit()]
+    cluster_ids = {r[0] for r in cluster_rows}
+    has_cluster = os.path.isfile(f"{db_dir}/dataguard_cluster_process.txt")
+    cluster_ok = bool(
+        ctx and _parse_dg_datetime(ctx[4]) and cluster_rows
+        and "DG_CLUSTER_OK" in [line.strip() for line in cluster_text.splitlines()]
+        and not _dg_query_failed(cluster_text)
+        and current_id in cluster_ids and node_ids.issubset(cluster_ids)
+        and all(_parse_dg_datetime(r[8]) for r in cluster_rows)
+    )
+    if cluster_ok:
+        # A mixed/truncated snapshot must not establish that every instance stopped.
+        times = [_parse_dg_datetime(r[8]) for r in cluster_rows] + [_parse_dg_datetime(ctx[4])]
+        cluster_ok = (max(times) - min(times)).total_seconds() < DB_THRESHOLDS["dataguard_stale_warn_seconds"]
+    cluster_apply = [r for r in cluster_rows if _dg_apply_process(r[3:8])] if cluster_ok else []
+    statuses, risks = [], []
+    value = "状态未知"
+    detail = f"本地Apply进程={len(local_apply)}，打开模式={identity['open_mode']}"
+    legacy_rac = False
+    if cluster_ok:
+        if cluster_apply:
+            owners = sorted({f"{r[2]} / {r[1]}" for r in cluster_apply})
+            value = "由 " + "、".join(owners) + " 执行"
+            detail += "；" + ("本实例承担Redo Apply" if any(r[0] == current_id for r in cluster_apply)
+                              else "本实例未承担Redo Apply，由同RAC其他实例执行")
+            statuses.append("OK")
+        else:
+            statuses.append("CRIT")
+            risks.append("集群未发现Redo Apply/MRP进程（预期应开启应用）")
+            value = "集群未发现应用进程"
+        detail += f"；集群覆盖实例={','.join(sorted(cluster_ids))}；采集时间={cluster_rows[0][8]}"
+    elif has_cluster:
+        statuses.append("UNKNOWN")
+        risks.append("集群Apply采集失败、上下文缺失或实例覆盖不完整，无法确认集群应用状态")
+    elif _dg_query_failed(local_text) or not os.path.isfile(f"{db_dir}/dataguard_process.txt") or not local_text.strip():
+        statuses.append("UNKNOWN")
+        risks.append("本地Redo Apply进程采集失败或缺失")
+    elif local_apply:
+        statuses.append("OK")
+        value = "本实例承担日志应用"
+    elif is_rac:
+        legacy_rac = identity["open_mode"] == "READ ONLY WITH APPLY"
+        statuses.append("INFO" if legacy_rac else "UNKNOWN")
+        value = "本实例未检测到Apply，集群应用实例待确认"
+        detail += "；旧采集包仅有本地进程，不能据此判断整个RAC的Redo Apply是否停止"
+    else:
+        statuses.append("CRIT")
+        risks.append("未发现Redo Apply/MRP进程")
+        value = "未发现应用进程"
+
+    process_rows = [r[3:8] for r in cluster_apply] if cluster_ok else local_apply
+    for row in process_rows:
+        action = row[3].strip().upper()
+        if any(token in action for token in ("ERROR", "WAIT_FOR_GAP", "WAIT FOR GAP", "STOPPED", "FAILED")):
+            statuses.append("CRIT")
+            risks.append(f"Apply进程状态异常：{action}")
+        elif not action or action in ("IDLE", "UNKNOWN"):
+            statuses.append("UNKNOWN")
+            risks.append(f"Apply进程运行状态待确认：{action or '缺失'}")
+    if identity["open_mode"] == "READ ONLY" and not is_rac:
+        statuses.append("CRIT")
+        risks.append("物理备库只读打开但未处于READ ONLY WITH APPLY")
+
+    # Do not borrow a non-applying instance's zero lag to declare cluster health.
+    selected_stats = []
+    if cluster_ok and cluster_apply:
+        stats_text = content("dataguard_cluster_stats")
+        owners = {r[0] for r in cluster_apply}
+        all_stats = [r for r in _parse_pipe_table(stats_text) if len(r) == 7 and r[0] in owners]
+        if not _dg_query_failed(stats_text) and "DG_STATS_OK" in [s.strip() for s in stats_text.splitlines()]:
+            for owner in sorted(owners):
+                matches = [r for r in all_stats if r[0] == owner and r[1].lower() == "apply lag"]
+                if matches:
+                    selected_stats.extend((r[2], r[4], r[5], r[6], f"实例{owner}") for r in matches)
+                else:
+                    statuses.append("UNKNOWN")
+                    risks.append(f"应用实例{owner}缺少Apply Lag")
+        else:
+            statuses.append("UNKNOWN")
+            risks.append("集群Apply Lag采集失败或缺少完成标记")
+    else:
+        stats_text = content("dataguard_stats")
+        if not _dg_query_failed(stats_text):
+            for r in _parse_pipe_table(stats_text):
+                if len(r) >= 5 and r[0].lower() == "apply lag":
+                    selected_stats.append((r[1], r[3], r[4], ctx[4] if ctx else "", "本地观测"))
+        if not selected_stats:
+            statuses.append("UNKNOWN")
+            risks.append("未获得Apply Lag")
+    lag_values = []
+    for lag_text, computed_text, datum_text, sampled_text, source in selected_stats:
+        lag = _parse_dg_interval_seconds(lag_text)
+        computed, datum, sampled = map(_parse_dg_datetime, (computed_text, datum_text, sampled_text))
+        if lag is None or lag < 0:
+            statuses.append("UNKNOWN")
+            risks.append(f"{source}的Apply Lag无效")
+        else:
+            lag_values.append(lag)
+            lag_status = _dg_lag_status(lag)
+            if lag_status != "OK":
+                statuses.append(lag_status)
+                risks.append(f"{source}应用延迟{_format_dg_duration(lag)}")
+        if not computed or not datum or (cluster_ok and cluster_apply and not sampled):
+            statuses.append("UNKNOWN")
+            risks.append(f"{source}的Apply Lag新鲜度无法确认")
+        else:
+            reference = sampled or computed
+            if cluster_ok:
+                reference = max(reference, max(_parse_dg_datetime(r[8]) for r in cluster_rows))
+            age = max(0, (reference - min(computed, datum)).total_seconds())
+            if datum > computed or (sampled and computed > sampled):
+                statuses.append("UNKNOWN")
+                risks.append(f"{source}的指标时间异常")
+            elif age >= DB_THRESHOLDS["dataguard_stale_warn_seconds"]:
+                statuses.append("CRIT" if age >= DB_THRESHOLDS["dataguard_stale_crit_seconds"] else "WARN")
+                risks.append(f"{source}的DG应用指标已过期{_format_dg_duration(age)}")
+    lag_value = max(lag_values) if lag_values else None
+    detail += f"；{'应用实例' if cluster_ok and cluster_apply else '本地观测'}Apply Lag={_format_dg_duration(lag_value)}"
+    if legacy_rac:
+        detail += "；本地延迟值仅供参考，不能证明集群应用正常"
+    if cluster_ok and cluster_apply:
+        value += f"（{_format_dg_duration(lag_value)}）"
+
+    gap_text = content("archive_gap")
+    if not _dg_query_failed(gap_text) and any(r[0].isdigit() for r in _parse_pipe_table(gap_text)):
+        statuses.append("CRIT")
+        risks.append("存在阻塞Redo Apply的归档缺口")
+    suggestion = "；".join(dict.fromkeys(risks))
+    if any(s in ("WARN", "CRIT") for s in statuses):
+        suggestion += "；请检查Redo Apply、归档缺口和备库资源"
+    elif "UNKNOWN" in statuses or legacy_rac:
+        suggestion += ("；" if suggestion else "") + "使用新版采集器重新采集集群应用状态"
+    extra = generate_data_table(
+        ["实例ID", "实例", "主机", "进程角色", "线程", "序列", "动作", "客户端", "采集时间"], cluster_rows
+    ) if cluster_ok else generate_data_table(["进程角色", "线程", "序列", "动作", "客户端"], local_rows)
+    return CheckResult("DG Redo应用", _dg_worst(statuses, "UNKNOWN"), value, detail, suggestion, extra_html=extra)
+
+
+def _parse_dataguard(db_dir: str) -> List[CheckResult]:
+    """按数据库角色解析 Data Guard/Active Data Guard 健康状态。"""
+    identity = _dataguard_identity(db_dir)
+    if not identity:
+        return []
+
+    dest_rows, has_extended_dest, dest_problem = _dataguard_dest_rows(db_dir)
+    remote_rows = _dg_remote_destinations(dest_rows)
+    dest_config_path = f"{db_dir}/dataguard_dest_config.txt"
+    dest_config_content = read_file(dest_config_path)
+    dest_config_rows = _data_rows(dest_config_content, ("DEST_ID",))
+    config_problem = bool(re.search(
+        r"^(?:ORA|SP2|TNS|LRM)-\d+", dest_config_content, re.MULTILINE | re.IGNORECASE
+    ))
+    if config_problem:
+        dest_config_rows = []
+    dest_config_rows = [(row + [""] * 5)[:5] for row in dest_config_rows]
+    role = identity["role"]
+    open_mode = identity["open_mode"]
+    has_remote = bool(remote_rows or dest_config_rows)
+    is_dataguard = role not in ("", "PRIMARY") or has_remote
+    primary_unknown = (
+        role == "PRIMARY" and identity["current"] and not has_remote
+        and (not os.path.isfile(dest_config_path) or config_problem or dest_problem)
+    )
+    label = "主库（Data Guard配置无法判定）" if primary_unknown else _dg_deployment_label(role, open_mode, has_remote)
+    identity_extra = generate_data_table(
+        ["数据库", "DB_UNIQUE_NAME", "角色", "打开模式", "归档模式", "保护模式", "实际保护级别", "切换状态"],
+        [[identity["name"], identity["unique_name"], role, open_mode, identity["log_mode"],
+          identity["protection_mode"], identity["protection_level"], identity["switchover"]]],
+    )
+    results = [CheckResult(
+        "DG/ADG部署识别", "INFO", label,
+        f"角色={role or '未知'}，打开模式={open_mode or '未知'}；ADG仅表示检测到实时查询运行特征，不代表许可证审计结论",
+        extra_html=identity_extra,
+    )]
+    if primary_unknown:
+        results.append(CheckResult(
+            "DG Redo传输", "UNKNOWN", "数据缺失",
+            "无法读取归档目的端配置，不能判断当前主库是否配置Data Guard",
+            "修复V$ARCHIVE_DEST/V$ARCHIVE_DEST_STATUS采集问题后重新巡检",
+        ))
+        return results
+    if not is_dataguard:
+        return results
+
+    protection_statuses = []
+    protection_risks = []
+    if identity["force_logging"] and identity["force_logging"] != "YES":
+        protection_statuses.append("WARN")
+        protection_risks.append("未启用FORCE LOGGING")
+    protection_mode = identity["protection_mode"]
+    protection_level = identity["protection_level"]
+    if protection_level == "UNPROTECTED":
+        protection_statuses.append("CRIT")
+        protection_risks.append("当前实际保护级别为UNPROTECTED")
+    elif protection_mode and protection_level and protection_mode != protection_level:
+        protection_statuses.append("WARN")
+        protection_risks.append("配置保护模式与实际保护级别不一致")
+    switchover = identity["switchover"]
+    if switchover in ("FAILED DESTINATION", "UNRESOLVABLE GAP", "RECOVERY NEEDED"):
+        protection_statuses.append("CRIT")
+        protection_risks.append(f"切换状态={switchover}")
+    elif switchover == "RESOLVABLE GAP":
+        protection_statuses.append("WARN")
+        protection_risks.append("切换状态存在可解析归档缺口")
+    if not identity["current"] and not any((identity["force_logging"], protection_mode, protection_level, switchover)):
+        protection_statuses.append("INFO")
+    protection_status = _dg_worst(protection_statuses)
+    results.append(CheckResult(
+        "DG保护模式与切换状态", protection_status,
+        protection_level or "未知",
+        f"保护模式={protection_mode or '未知'}，实际级别={protection_level or '未知'}，切换状态={switchover or '未知'}，FORCE_LOGGING={identity['force_logging'] or '未知'}",
+        "；".join(protection_risks) + ("；请核对Data Guard保护目标与切换条件" if protection_risks else ""),
+    ))
+
+    stats_path = f"{db_dir}/dataguard_stats.txt"
+    stats_content = read_file(stats_path)
+    stats_rows = _data_rows(stats_content, ("NAME",))
+    stats = {row[0].strip().lower(): row for row in stats_rows if len(row) >= 2}
+    transport_row = stats.get("transport lag")
+    apply_row = stats.get("apply lag")
+    finish_row = stats.get("apply finish time")
+    transport_lag = _parse_dg_interval_seconds(transport_row[1]) if transport_row else None
+    apply_lag = _parse_dg_interval_seconds(apply_row[1]) if apply_row else None
+    finish_time = _parse_dg_interval_seconds(finish_row[1]) if finish_row else None
+    stale_seconds = []
+    for row in (transport_row, apply_row):
+        if row and len(row) >= 5:
+            computed = _parse_dg_datetime(row[3])
+            datum = _parse_dg_datetime(row[4])
+            if computed and datum:
+                stale_seconds.append(max(0, (computed - datum).total_seconds()))
+    max_stale = max(stale_seconds) if stale_seconds else None
+
+    transport_statuses = []
+    transport_risks = []
+    if identity["current"] and dest_problem:
+        transport_statuses.append("UNKNOWN")
+        transport_risks.append("归档目的端运行状态采集失败")
+    elif not identity["current"] and dest_problem and not os.path.isfile(stats_path):
+        transport_statuses.append("INFO")
+    for row in dest_config_rows:
+        status = row[1].strip().upper()
+        error = row[4].strip()
+        if error or status == "ERROR":
+            transport_statuses.append("CRIT")
+            transport_risks.append(f"配置DEST {row[0]}错误：{error or status}")
+        elif status in ("DEFERRED", "DISABLED", "BAD PARAM"):
+            transport_statuses.append("WARN")
+            transport_risks.append(f"配置DEST {row[0]}状态={status}")
+    for row in remote_rows:
+        status = row[1].strip().upper()
+        sync_status = row[8].strip().upper()
+        gap_status = row[9].strip().upper()
+        error = row[10].strip()
+        if error or status == "ERROR":
+            transport_statuses.append("CRIT")
+            transport_risks.append(f"DEST {row[0]}传输错误：{error or status}")
+        elif status in ("DEFERRED", "DISABLED", "BAD PARAM"):
+            transport_statuses.append("WARN")
+            transport_risks.append(f"DEST {row[0]}状态={status}")
+        if sync_status in ("CHECK CONNECTIVITY", "DESTINATION HAS A GAP", "CHECK STANDBY REDO LOG"):
+            transport_statuses.append("CRIT")
+            transport_risks.append(f"DEST {row[0]}同步状态={sync_status}")
+        elif sync_status == "CHECK CONFIGURATION" and protection_mode in ("MAXIMUM PROTECTION", "MAXIMUM AVAILABILITY"):
+            transport_statuses.append("WARN")
+            transport_risks.append(f"DEST {row[0]}需要检查同步配置")
+        if row[7].strip().upper() == "NO" and protection_mode in ("MAXIMUM PROTECTION", "MAXIMUM AVAILABILITY"):
+            transport_statuses.append("CRIT")
+            transport_risks.append(f"DEST {row[0]}未同步")
+        if gap_status in ("UNRESOLVABLE GAP", "LOCALLY UNRESOLVABLE GAP"):
+            transport_statuses.append("CRIT")
+            transport_risks.append(f"DEST {row[0]}存在不可解析Gap")
+        elif gap_status in ("RESOLVABLE GAP", "LOG SWITCH GAP"):
+            transport_statuses.append("WARN")
+            transport_risks.append(f"DEST {row[0]}存在{gap_status}")
+    if transport_lag is not None:
+        lag_status = _dg_lag_status(transport_lag)
+        transport_statuses.append(lag_status)
+        if lag_status != "OK":
+            transport_risks.append(f"传输延迟{_format_dg_duration(transport_lag)}")
+    elif role != "PRIMARY" and identity["current"] and not os.path.isfile(stats_path):
+        transport_statuses.append("UNKNOWN")
+        transport_risks.append("缺少Transport Lag采集文件")
+    elif role != "PRIMARY" and os.path.isfile(stats_path):
+        transport_statuses.append("UNKNOWN")
+        transport_risks.append("未获得Transport Lag")
+    if max_stale is not None:
+        if max_stale >= DB_THRESHOLDS["dataguard_stale_crit_seconds"]:
+            transport_statuses.append("CRIT")
+            transport_risks.append(f"DG指标数据已停滞{_format_dg_duration(max_stale)}")
+        elif max_stale >= DB_THRESHOLDS["dataguard_stale_warn_seconds"]:
+            transport_statuses.append("WARN")
+            transport_risks.append(f"DG指标数据已停滞{_format_dg_duration(max_stale)}")
+    if role == "PRIMARY" and not has_remote:
+        transport_statuses.append("UNKNOWN")
+        transport_risks.append("未获得远程备用库目的端")
+    transport_status = _dg_worst(transport_statuses)
+    dest_extra = generate_data_table(
+        ["DEST", "状态", "类型", "数据库模式", "恢复模式", "远端唯一名", "目标", "同步", "同步诊断", "Gap", "错误", "归档线程", "归档序列", "应用线程", "应用序列"],
+        dest_rows,
+    ) if dest_rows else ""
+    results.append(CheckResult(
+        "DG Redo传输", transport_status,
+        _format_dg_duration(transport_lag) if transport_lag is not None else f"{max(len(remote_rows), len(dest_config_rows))}个远程目的端",
+        f"远程目的端={max(len(remote_rows), len(dest_config_rows))}，Transport Lag={_format_dg_duration(transport_lag)}，指标停滞={_format_dg_duration(max_stale)}" +
+        ("；旧采集包不含扩展同步字段" if not has_extended_dest else ""),
+        "；".join(dict.fromkeys(transport_risks)) + ("；请检查网络、归档目的端和Redo传输服务" if transport_risks else ""),
+        extra_html=(generate_data_table(
+            ["配置DEST", "状态", "目标类型", "目标", "错误"], dest_config_rows
+        ) if dest_config_rows else "") + dest_extra,
+    ))
+
+    if role == "PHYSICAL STANDBY":
+        results.append(_parse_physical_dg_apply(db_dir, identity))
+    elif role == "LOGICAL STANDBY":
+        process_path = f"{db_dir}/dataguard_process.txt"
+        process_content = read_file(process_path)
+        process_rows = _data_rows(process_content, ("PROCESS_ROLE", "PROCESS"))
+        process_problem = bool(re.search(
+            r"^(?:ORA|SP2|TNS|LRM)-\d+", process_content, re.MULTILINE | re.IGNORECASE
+        ))
+        if process_problem:
+            process_rows = []
+        apply_processes = [
+            row for row in process_rows
+            if any(token in " ".join(row).upper() for token in ("MRP", "APPLY", "LOGMERGER", "MANAGED RECOVERY"))
+        ]
+        apply_statuses = []
+        apply_risks = []
+        if os.path.isfile(process_path) and not apply_processes and apply_lag is None:
+            apply_statuses.append("UNKNOWN")
+            apply_risks.append("无法确认SQL Apply进程")
+        if apply_lag is not None:
+            lag_status = _dg_lag_status(apply_lag)
+            apply_statuses.append(lag_status)
+            if lag_status != "OK":
+                apply_risks.append(f"应用延迟{_format_dg_duration(apply_lag)}")
+        elif identity["current"] and not os.path.isfile(stats_path):
+            apply_statuses.append("UNKNOWN")
+            apply_risks.append("缺少Apply Lag采集文件")
+        elif os.path.isfile(stats_path):
+            apply_statuses.append("UNKNOWN")
+            apply_risks.append("未获得Apply Lag")
+        apply_status = _dg_worst(apply_statuses, "INFO")
+        process_extra = generate_data_table(
+            ["进程角色", "线程", "序列", "动作", "客户端进程"], process_rows
+        ) if process_rows else ""
+        results.append(CheckResult(
+            "DG Redo应用", apply_status,
+            _format_dg_duration(apply_lag) if apply_lag is not None else ("运行中" if apply_processes else "状态未知"),
+            f"Apply进程={len(apply_processes)}，Apply Lag={_format_dg_duration(apply_lag)}，预计追平时间={_format_dg_duration(finish_time)}，打开模式={open_mode}",
+            "；".join(dict.fromkeys(apply_risks)) + ("；请检查Redo Apply、归档缺口和备库资源" if apply_risks else ""),
+            extra_html=process_extra,
+        ))
+
+    gap_path = f"{db_dir}/archive_gap.txt"
+    gap_content = read_file(gap_path)
+    gap_rows = _data_rows(gap_content, ("THREAD#",))
+    gap_problem = bool(re.search(
+        r"^(?:ORA|SP2|TNS|LRM)-\d+", gap_content, re.MULTILINE | re.IGNORECASE
+    ))
+    if gap_problem:
+        gap_rows = []
+    sequence_path = f"{db_dir}/dataguard_sequence.txt"
+    sequence_content = read_file(sequence_path)
+    sequence_rows = _data_rows(sequence_content, ("THREAD#",))
+    sequence_problem = bool(re.search(
+        r"^(?:ORA|SP2|TNS|LRM)-\d+", sequence_content, re.MULTILINE | re.IGNORECASE
+    ))
+    if sequence_problem:
+        sequence_rows = []
+    sequence_status = "CRIT" if gap_rows else "OK"
+    sequence_risks = ["存在阻塞Redo Apply的归档缺口"] if gap_rows else []
+    if not os.path.isfile(gap_path):
+        sequence_status = "UNKNOWN" if identity["current"] else "INFO"
+        if identity["current"]:
+            sequence_risks.append("缺少归档缺口采集文件")
+    elif gap_problem:
+        sequence_status = "UNKNOWN"
+        sequence_risks.append("归档缺口查询失败")
+    if sequence_problem:
+        sequence_status = _dg_worst([sequence_status, "UNKNOWN"])
+        sequence_risks.append("RFS接收/应用序列查询失败")
+    elif role != "PRIMARY" and identity["current"] and not os.path.isfile(sequence_path):
+        sequence_status = _dg_worst([sequence_status, "UNKNOWN"])
+        sequence_risks.append("缺少RFS接收/应用序列采集文件")
+    elif role != "PRIMARY" and os.path.isfile(sequence_path) and not sequence_rows:
+        sequence_status = _dg_worst([sequence_status, "UNKNOWN"])
+        sequence_risks.append("未获得RFS接收/应用序列")
+    backlog = []
+    for row in sequence_rows:
+        if len(row) >= 4:
+            try:
+                applied_candidates = [int(value) for value in row[2:4] if str(value).strip()]
+                if not applied_candidates:
+                    raise ValueError
+                backlog.append(max(0, int(row[1]) - max(applied_candidates)))
+            except (TypeError, ValueError):
+                if role != "PRIMARY":
+                    sequence_status = _dg_worst([sequence_status, "UNKNOWN"])
+                    sequence_risks.append(f"线程{row[0]}缺少可解析的应用序列")
+    sequence_extra = ""
+    if sequence_rows:
+        sequence_extra += generate_data_table(["线程", "已接收序列", "磁盘已应用序列", "内存已应用序列"], sequence_rows)
     if gap_rows:
-        dg_extra += generate_data_table(["线程", "缺口起始", "缺口结束"], gap_rows)
-    results.append(CheckResult("Data Guard/归档传输", dg_status, f"{len(gap_rows)}个归档缺口",
-                               f"启用归档目标: {len(dg_rows)}，传输错误: {len(dg_errors)}，归档缺口: {len(gap_rows)}",
-                               "请检查归档传输、应用进程与网络状态" if dg_status != "OK" else "",
-                               extra_html=dg_extra))
+        sequence_extra += generate_data_table(["线程", "缺口起始", "缺口结束"], gap_rows)
+    results.append(CheckResult(
+        "DG归档缺口与序列", sequence_status,
+        f"{len(gap_rows)}个缺口" + (f"/最大序列差{max(backlog)}" if backlog else ""),
+        f"归档缺口={len(gap_rows)}，RAC线程={len(sequence_rows)}" + (f"，最大接收/磁盘应用序列差={max(backlog)}" if backlog else ""),
+        "；".join(sequence_risks) + ("；请恢复缺失归档并确认FAL自动补档" if sequence_risks else ""),
+        extra_html=sequence_extra,
+    ))
+
+    redo_path = f"{db_dir}/dataguard_redo_config.txt"
+    redo_content = read_file(redo_path)
+    redo_rows = _data_rows(redo_content, ("THREAD#",))
+    if role != "FAR SYNC":
+        if not os.path.isfile(redo_path):
+            redo_status = "UNKNOWN" if identity["current"] else "INFO"
+            redo_value = "数据缺失" if identity["current"] else "旧版未采集"
+            redo_detail = "缺少Standby Redo Log配置采集文件" if identity["current"] else "旧采集包不含Standby Redo Log配置"
+            redo_risks = ["请重新执行当前版本采集器"] if identity["current"] else []
+        elif "ORA-" in redo_content.upper() or not redo_rows:
+            redo_status = "UNKNOWN"
+            redo_value = "数据缺失"
+            redo_detail = "无法读取Online Redo与Standby Redo Log配置"
+            redo_risks = ["请检查动态性能视图查询权限"]
+        else:
+            redo_risks = []
+            normalized_redo = [(row + [""] * 5)[:5] for row in redo_rows]
+            online_rows = []
+            unassigned_groups = 0
+            unassigned_min_mb = None
+            for row in normalized_redo:
+                try:
+                    if int(row[1]) > 0:
+                        online_rows.append(row)
+                    elif str(row[0]).strip() == "0":
+                        unassigned_groups += int(row[3])
+                        if row[4]:
+                            value = float(row[4])
+                            unassigned_min_mb = value if unassigned_min_mb is None else min(unassigned_min_mb, value)
+                except ValueError:
+                    redo_risks.append(f"线程{row[0]} Redo配置无法解析")
+            for row in online_rows:
+                row = (row + [""] * 5)[:5]
+                try:
+                    online_groups = int(row[1])
+                    standby_groups = int(row[3])
+                    standby_min_mb = float(row[4]) if row[4] else None
+                    if len(online_rows) == 1 and unassigned_groups:
+                        standby_groups += unassigned_groups
+                        if unassigned_min_mb is not None:
+                            standby_min_mb = unassigned_min_mb if standby_min_mb is None else min(standby_min_mb, unassigned_min_mb)
+                    if standby_groups < online_groups + 1:
+                        redo_risks.append(f"线程{row[0]} SRL组数{standby_groups}，少于建议值{online_groups + 1}")
+                    if row[2] and standby_min_mb is not None and standby_min_mb < float(row[2]):
+                        redo_risks.append(f"线程{row[0]} SRL最小大小低于Online Redo")
+                except ValueError:
+                    redo_risks.append(f"线程{row[0]} Redo配置无法解析")
+            if len(online_rows) > 1 and unassigned_groups:
+                redo_risks.append(f"存在{unassigned_groups}组未分配线程的SRL，RAC环境需按Thread核对")
+            if not online_rows:
+                redo_status = "UNKNOWN"
+                redo_risks.append("未获得Online Redo线程配置")
+            else:
+                redo_status = "WARN" if redo_risks else "OK"
+            redo_value = f"{len(online_rows)}个线程"
+            redo_detail = f"已核对{len(online_rows)}个Redo线程的日志组数量和最小大小"
+        results.append(CheckResult(
+            "DG Standby Redo Log", redo_status, redo_value, redo_detail,
+            "；".join(redo_risks) + ("；请按每线程Online Redo组数+1配置同等或更大尺寸的SRL" if redo_risks else ""),
+            extra_html=generate_data_table(
+                ["线程", "Online组数", "Online最小MB", "Standby组数", "Standby最小MB"], redo_rows
+            ) if redo_rows else "",
+        ))
+
+    events_path = f"{db_dir}/dataguard_events.txt"
+    events_content = read_file(events_path)
+    event_rows = _data_rows(events_content, ("TIMESTAMP",))
+    if os.path.isfile(events_path):
+        event_problem = bool(re.search(
+            r"^(?:ORA|SP2|TNS|LRM)-\d+", events_content, re.MULTILINE | re.IGNORECASE
+        ))
+        if event_problem:
+            event_rows = []
+        else:
+            event_rows = [row[:5] + ["|".join(row[5:])] if len(row) > 6 else row for row in event_rows]
+        event_statuses = []
+        for row in event_rows:
+            severity = row[2].strip().upper() if len(row) > 2 else ""
+            event_statuses.append("CRIT" if severity in ("ERROR", "FATAL") else "WARN")
+        event_status = "UNKNOWN" if event_problem else _dg_worst(event_statuses)
+        results.append(CheckResult(
+            "DG近24小时事件", event_status, "采集失败" if event_problem else f"{len(event_rows)}个异常事件",
+            "Data Guard事件查询失败" if event_problem else f"Data Guard Warning/Error/Fatal事件={len(event_rows)}",
+            "请检查V$DATAGUARD_STATUS查询权限" if event_problem else ("请结合事件时间、错误码和Alert Log处理传输或应用异常" if event_rows else ""),
+            extra_html=generate_data_table(
+                ["时间", "设施", "级别", "错误码", "DEST", "消息"], event_rows[:100]
+            ) if event_rows else "",
+        ))
+    elif identity["current"]:
+        results.append(CheckResult(
+            "DG近24小时事件", "UNKNOWN", "数据缺失",
+            "缺少Data Guard事件采集文件",
+            "请重新执行当前版本采集器",
+        ))
+
     return results
 
 
@@ -326,6 +1004,7 @@ def _parse_instance_status(db_dir: str) -> CheckResult:
     suggestion = ""
     instance_rows = []
     database_data = None
+    abnormal = []
 
     if content:
         # 检查是否有 SQL 错误
@@ -370,6 +1049,40 @@ def _parse_instance_status(db_dir: str) -> CheckResult:
         if db_rows and len(db_rows[0]) >= 5:
             database_data = db_rows[0][:5]
 
+    # 物理备库正常情况下可以保持 MOUNTED；实例健康必须结合数据库角色和
+    # OPEN_MODE 判断，不能沿用主库必须 OPEN/READ WRITE 的单一规则。
+    if instance_rows and database_data:
+        role = database_data[2].upper()
+        open_mode = database_data[1].upper()
+        allowed_instance_states = {
+            "PHYSICAL STANDBY": {"OPEN", "MOUNTED"},
+            "FAR SYNC": {"MOUNTED", "OPEN"},
+        }.get(role, {"OPEN"})
+        allowed_open_modes = {
+            "PRIMARY": {"READ WRITE"},
+            "PHYSICAL STANDBY": {"MOUNTED", "READ ONLY", "READ ONLY WITH APPLY"},
+            "LOGICAL STANDBY": {"READ WRITE", "READ ONLY"},
+            "SNAPSHOT STANDBY": {"READ WRITE"},
+            "FAR SYNC": {"MOUNTED"},
+        }.get(role, {open_mode})
+        abnormal = [
+            row for row in instance_rows
+            if row[3].upper() not in allowed_instance_states or row[4].upper() != "ACTIVE"
+        ]
+        mode_abnormal = open_mode not in allowed_open_modes
+        if abnormal or mode_abnormal:
+            status = "CRIT"
+            suggestion = "实例状态或数据库打开模式与当前数据库角色不匹配，请立即检查"
+        else:
+            status = "OK"
+            suggestion = ""
+        instance_names = "、".join(row[1] for row in instance_rows)
+        detail = (
+            f"GV$INSTANCE 返回 {len(instance_rows)} 个实例：{instance_names}；"
+            f"数据库角色={role}，打开模式={open_mode}；"
+            f"{'状态与角色匹配' if not abnormal and not mode_abnormal else '实例状态或打开模式异常'}"
+        )
+
     extra_parts = []
     if instance_rows:
         extra_parts.extend([
@@ -400,6 +1113,46 @@ def _parse_instance_status(db_dir: str) -> CheckResult:
     )
 
 
+def _pdb_database_role(db_dir):
+    """Use collected database roles; conflicting snapshots are not a primary default."""
+    roles = set()
+    known = {"PRIMARY", "PHYSICAL STANDBY", "LOGICAL STANDBY", "SNAPSHOT STANDBY", "FAR SYNC"}
+    for filename in ("dataguard_identity.txt", "database_status.txt"):
+        content = read_file(f"{db_dir}/{filename}")
+        if _dg_query_failed(content):
+            continue
+        for row in _parse_pipe_table(content):
+            if len(row) >= 3 and row[2].upper() in known:
+                roles.add(row[2].upper())
+    return next(iter(roles)) if len(roles) == 1 else ""
+
+
+def _pdb_open_mode_assessment(name, mode, role):
+    """PDB OPEN_MODE does not use the CDB-only READ ONLY WITH APPLY value."""
+    mode = mode.strip().upper()
+    if not mode:
+        return "UNKNOWN", "缺少PDB打开模式"
+    if name.upper() == "PDB$SEED":
+        return (("OK", "种子容器只读或挂载") if mode in {"READ ONLY", "MOUNTED"}
+                else ("WARN", "种子容器打开模式异常，预期READ ONLY"))
+    # Retain the existing policy accepting deliberately mounted PDBs.
+    if mode == "MOUNTED":
+        return "OK", "PDB已挂载，按现有巡检策略接受"
+    if not role:
+        return "UNKNOWN", "数据库角色缺失或采集结果不一致，无法按角色判断PDB打开模式"
+    if role == "PHYSICAL STANDBY":
+        if mode == "READ ONLY":
+            return "OK", "物理备库PDB只读，符合角色预期"
+        return "WARN", f"物理备库PDB打开模式为{mode}，与预期READ ONLY不符；核对角色切换或采集数据一致性"
+    if role in {"PRIMARY", "SNAPSHOT STANDBY", "LOGICAL STANDBY"}:
+        if mode == "READ WRITE":
+            return "OK", "PDB读写打开，符合角色预期"
+        if mode == "READ ONLY":
+            return "INFO", "PDB为只读配置，请按业务用途确认是否符合预期"
+        return "WARN", f"PDB打开模式为{mode}，请核对维护状态及业务要求"
+    return "UNKNOWN", f"数据库角色{role}不适用于普通PDB打开模式判断"
+
+
 def _parse_cdb_info(db_dir: str) -> List[CheckResult]:
     """解析 CDB/PDB 信息，判断是否为 CDB，如果是则检查 PDB"""
     results = []
@@ -428,13 +1181,14 @@ def _parse_cdb_info(db_dir: str) -> List[CheckResult]:
         return results
 
     pdb_info = []
-    closed_count = 0
+    role = _pdb_database_role(db_dir)
+    assessments = []
+    notes = []
     total_size_gb = 0.0
 
     for r in pdb_data:
         pdb_name = r[0] if len(r) > 0 else ""
         pdb_id = r[1] if len(r) > 1 else ""
-        status = r[2] if len(r) > 2 else ""
         open_mode = r[3] if len(r) > 3 else ""
         restricted = r[4] if len(r) > 4 else ""
         open_time = r[5] if len(r) > 5 else ""
@@ -442,45 +1196,32 @@ def _parse_cdb_info(db_dir: str) -> List[CheckResult]:
             size_gb = float(r[6]) if len(r) > 6 else 0.0
         except ValueError:
             size_gb = 0.0
-
         total_size_gb += size_gb
-        om_upper = open_mode.upper()
-        # PDB$SEED 是种子容器，正常状态为 READ ONLY
-        is_seed = pdb_name.upper() == "PDB$SEED"
-        if is_seed:
-            # 种子容器 READ ONLY 为正常，其他状态为异常
-            if om_upper != "READ ONLY" and om_upper != "MOUNTED":
-                closed_count += 1
-        else:
-            # 普通 PDB 正常状态为 READ WRITE，MOUNTED 可接受
-            if om_upper != "READ WRITE" and om_upper != "MOUNTED":
-                closed_count += 1
+        state, reason = _pdb_open_mode_assessment(pdb_name, open_mode, role)
+        assessments.append(state)
+        if state != "OK":
+            notes.append(f"{pdb_name}：{reason}")
+        pdb_info.append((pdb_name, pdb_id, r[2] if len(r) > 2 else "", open_mode,
+                         restricted, f"{size_gb:.2f}", open_time, reason))
 
-        pdb_info.append((pdb_name, pdb_id, status, open_mode, restricted,
-                         open_time, size_gb))
-
-    # PDB 概览
-    status = "OK"
-    suggestion = ""
-    if closed_count > 0:
-        status = "WARN"
-        suggestion = f"存在 {closed_count} 个 PDB 未正常打开"
-
-    table_rows = []
-    for name, pdb_id, st, om, restricted, ot, sz in pdb_info:
-        table_rows.append((name, pdb_id, st, om, restricted, f"{sz:.2f}", ot))
-
-    extra = generate_data_table(
-        ["PDB名称", "PDB_ID", "状态", "打开模式", "受限", "大小(GB)", "打开时间"],
-        table_rows
-    )
-
+    status = _dg_worst([s for s in assessments if s != "OK"], "OK")
+    abnormal_count = sum(s in ("WARN", "CRIT") for s in assessments)
+    detail = f"CDB架构，共 {len(pdb_info)} 个PDB，总大小 {total_size_gb:.2f}GB；数据库角色={role or '未知或不一致'}"
+    if role == "PHYSICAL STANDBY":
+        detail += "；物理备库PDB的READ ONLY为正常打开模式"
+    if abnormal_count:
+        detail += f"；{abnormal_count}个PDB打开模式异常"
+    if "UNKNOWN" in assessments:
+        detail += "；存在无法判定的PDB打开模式"
+    if "INFO" in assessments:
+        detail += "；存在需按业务用途确认的只读PDB"
     results.append(CheckResult(
         "CDB/PDB", status, f"{len(pdb_info)}个PDB/{total_size_gb:.2f}GB",
-        f"CDB架构，共 {len(pdb_info)} 个PDB，总大小 {total_size_gb:.2f}GB" +
-        (f"，{closed_count}个未打开" if closed_count > 0 else ""),
-        suggestion,
-        extra_html=extra
+        detail, "；".join(notes),
+        extra_html=generate_data_table(
+            ["PDB名称", "PDB_ID", "状态", "打开模式", "受限", "大小(GB)", "打开时间", "模式判定"],
+            pdb_info,
+        ),
     ))
 
     # PDB 数据文件
@@ -518,16 +1259,14 @@ def _parse_cdb_info(db_dir: str) -> List[CheckResult]:
         df_table_rows = []
         for key, files in df_by_pdb.items():
             pdb_display = key.split("-", 1)[1] if "-" in key else key
-            for fname, ts, total, used, maxsz, auto, st in files[:10]:
+            for fname, ts, total, used, maxsz, auto, st in files:
                 df_table_rows.append((pdb_display, fname, ts, f"{total:.0f}", f"{used:.0f}", f"{maxsz:.0f}", auto, st))
-            if len(files) > 10:
-                df_table_rows.append((pdb_display, f"...({len(files)-10}个更多)", "", "", "", "", "", ""))
 
         results.append(CheckResult(
             "PDB数据文件", "OK", f"{len(df_data)}个",
-            f"共 {len(df_data)} 个PDB数据文件",
+            f"共 {len(df_data)} 个PDB数据文件；可用数据区是 USER_BYTES，不代表实际已使用空间",
             extra_html=generate_data_table(
-                ["PDB", "文件名", "表空间", "总大小(MB)", "已用(MB)", "最大(MB)", "自动扩展", "在线状态"],
+                ["PDB", "文件名", "表空间", "总大小(MB)", "可用数据区(MB)", "最大(MB)", "自动扩展", "在线状态"],
                 df_table_rows
             )
         ))
@@ -653,212 +1392,8 @@ def _parse_rac_info(db_dir: str) -> List[CheckResult]:
 
 
 def _parse_awr_metrics(db_dir: str) -> List[CheckResult]:
-    """解析 AWR 关键指标"""
-    results = []
-
-    snap_content = read_file(f"{db_dir}/awr_snapshot.txt")
-    if snap_content.startswith("SKIPPED|"):
-        reason = snap_content.split("|", 1)[1].strip()
-        results.append(CheckResult(
-            "AWR分析", "INFO", "未启用", reason,
-            "如需 AWR 指标，请确认 Oracle 授权范围后设置 CHECK_AWR=on",
-        ))
-        return results
-    if not snap_content or "ORA-" in snap_content.upper():
-        results.append(CheckResult("AWR分析", "WARN", "不可用",
-                                   "AWR未启用或无快照数据，请检查 AWR 设置"))
-        return results
-
-    snap_rows = _parse_pipe_table(snap_content)
-    snap_data = [r for r in snap_rows if r and not any(h in r[0].upper() for h in ["SNAP_ID"])]
-    if not snap_data:
-        results.append(CheckResult("AWR分析", "WARN", "不可用", "无AWR快照数据"))
-        return results
-
-    latest_snap_id = snap_data[0][0]
-
-    sysstat_content = read_file(f"{db_dir}/awr_sysstat.txt")
-    sysstat_rows = _parse_pipe_table(sysstat_content)
-    sysstat_data = [r for r in sysstat_rows if r and not any(h in r[0].upper() for h in ["SNAP_ID"])]
-
-    stats = {}
-    for r in sysstat_data:
-        if len(r) >= 4:
-            snap_id = r[0]
-            stat_name = r[2]
-            try:
-                value = float(r[3])
-            except ValueError:
-                value = 0
-            if snap_id not in stats:
-                stats[snap_id] = {}
-            stats[snap_id][stat_name] = value
-
-    if len(stats) < 2:
-        results.append(CheckResult("AWR分析", "WARN", "数据不足",
-                                   "AWR快照数据不足，无法计算差值"))
-        return results
-
-    snap_ids = sorted(stats.keys())
-    latest_snap = snap_ids[-1]
-    prev_snap = snap_ids[-2]
-
-    def get_diff(stat_name):
-        curr = stats[latest_snap].get(stat_name, 0)
-        prev = stats[prev_snap].get(stat_name, 0)
-        return max(curr - prev, 0)
-
-    cpu_used = get_diff("CPU used by this session")
-    db_block_gets = get_diff("db block gets")
-    cons_gets = get_diff("consistent gets")
-    phys_reads = get_diff("physical reads")
-    phys_writes = get_diff("physical writes")
-    redo_size = get_diff("redo size")
-    user_commits = get_diff("user commits")
-    user_rollbacks = get_diff("user rollbacks")
-    parse_count = get_diff("parse count (total)")
-    execute_count = get_diff("execute count")
-
-    total_gets = db_block_gets + cons_gets
-    buffer_cache_hit = (1 - phys_reads / total_gets) * 100 if total_gets > 0 else 0
-    parse_ratio = (parse_count / execute_count) * 100 if execute_count > 0 else 0
-
-    metrics = []
-    metrics.append(("缓冲区命中率", f"{buffer_cache_hit:.1f}%",
-                   "OK" if buffer_cache_hit >= 90 else "WARN" if buffer_cache_hit >= 80 else "CRIT"))
-    metrics.append(("解析比例", f"{parse_ratio:.1f}%",
-                   "OK" if parse_ratio <= 10 else "WARN" if parse_ratio <= 20 else "CRIT"))
-    metrics.append(("CPU使用(秒)", f"{cpu_used/100:.1f}", "OK"))
-    metrics.append(("物理读(次)", f"{phys_reads:,}", "OK"))
-    metrics.append(("物理写(次)", f"{phys_writes:,}", "OK"))
-    metrics.append(("Redo大小(KB)", f"{redo_size/1024:.0f}", "OK"))
-    metrics.append(("提交次数", f"{user_commits:,}", "OK"))
-    metrics.append(("回滚次数", f"{user_rollbacks:,}",
-                   "OK" if user_rollbacks <= user_commits * 0.1 else "WARN"))
-
-    table_rows = [(name, value, status) for name, value, status in metrics]
-    metrics_table = generate_data_table(["指标", "值", "状态"], table_rows)
-
-    worst_status = "OK"
-    for _, _, status in metrics:
-        if status == "CRIT":
-            worst_status = "CRIT"
-            break
-        elif status == "WARN":
-            worst_status = "WARN"
-
-    results.append(CheckResult(
-        "AWR关键指标", worst_status, f"快照#{latest_snap}",
-        f"AWR 快照 #{latest_snap} vs #{prev_snap} 的增量指标",
-        "解析/执行比例或缓冲区命中率异常；请结合 Top SQL 检查硬解析、游标复用与绑定变量使用" if worst_status != "OK" else "",
-        extra_html=metrics_table
-    ))
-
-    top_events_content = read_file(f"{db_dir}/awr_top_events.txt")
-    top_events_rows = _parse_pipe_table(top_events_content)
-    top_events_data = [r for r in top_events_rows if r and not any(h in r[0].upper() for h in ["SNAP_ID"])]
-
-    if top_events_data:
-        event_table_rows = []
-        for r in top_events_data[:10]:
-            snap_id = r[0] if len(r) > 0 else ""
-            event = r[1] if len(r) > 1 else ""
-            wait_class = r[2] if len(r) > 2 else ""
-            try:
-                total_waits = int(r[3]) if len(r) > 3 else 0
-            except ValueError:
-                total_waits = 0
-            try:
-                time_waited = float(r[4]) / 1000000 if len(r) > 4 else 0
-            except ValueError:
-                time_waited = 0
-            try:
-                avg_wait = float(r[5]) / 1000 if len(r) > 5 else 0
-            except ValueError:
-                avg_wait = 0
-            event_table_rows.append((snap_id, event, wait_class, f"{total_waits:,}",
-                                     f"{time_waited:.2f}s", f"{avg_wait:.2f}ms"))
-
-        results.append(CheckResult(
-            "AWR等待事件", "OK", "已检查",
-            f"AWR 顶级等待事件（排除Idle）",
-            extra_html=generate_data_table(
-                ["快照", "事件", "等待类别", "总等待", "等待时间", "平均等待"],
-                event_table_rows
-            )
-        ))
-
-    seg_stats_content = read_file(f"{db_dir}/awr_seg_stats.txt")
-    seg_stats_rows = _parse_pipe_table(seg_stats_content)
-    seg_stats_data = [r for r in seg_stats_rows if r and not any(h in r[0].upper() for h in ["SNAP_ID"])]
-
-    if seg_stats_data:
-        seg_table_rows = []
-        for r in seg_stats_data[:10]:
-            snap_id = r[0] if len(r) > 0 else ""
-            owner = r[1] if len(r) > 1 else ""
-            obj_name = r[2] if len(r) > 2 else ""
-            ts = r[3] if len(r) > 3 else ""
-            try:
-                phys_reads = int(r[4]) if len(r) > 4 else 0
-            except ValueError:
-                phys_reads = 0
-            try:
-                phys_writes = int(r[5]) if len(r) > 5 else 0
-            except ValueError:
-                phys_writes = 0
-            try:
-                log_reads = int(r[6]) if len(r) > 6 else 0
-            except ValueError:
-                log_reads = 0
-            try:
-                lock_waits = int(r[7]) if len(r) > 7 else 0
-            except ValueError:
-                lock_waits = 0
-            seg_table_rows.append((snap_id, f"{owner}.{obj_name}", ts,
-                                    f"{phys_reads:,}", f"{phys_writes:,}",
-                                    f"{log_reads:,}", f"{lock_waits:,}"))
-
-        results.append(CheckResult(
-            "AWR热点段", "OK", "已检查",
-            f"AWR 热点段（IO最多的段）",
-            extra_html=generate_data_table(
-                ["快照", "段名", "表空间", "物理读", "物理写", "逻辑读", "行锁等待"],
-                seg_table_rows
-            )
-        ))
-
-    sqlstat_content = read_file(f"{db_dir}/awr_sqlstat.txt")
-    sqlstat_rows = _parse_pipe_table(sqlstat_content)
-    sqlstat_data = [r for r in sqlstat_rows if r and not any(h in r[0].upper() for h in ["SNAP_ID"])]
-
-    if sqlstat_data:
-        sql_table_rows = []
-        for r in sqlstat_data[:10]:
-            snap_id = r[0] if len(r) > 0 else ""
-            sql_id = r[1] if len(r) > 1 else ""
-            execs = int(r[3]) if len(r) > 3 else 0
-            elapsed = float(r[4]) / 1000000 if len(r) > 4 else 0
-            cpu = float(r[5]) / 1000000 if len(r) > 5 else 0
-            buffers = int(r[6]) if len(r) > 6 else 0
-            disk_reads = int(r[7]) if len(r) > 7 else 0
-            rows = int(r[8]) if len(r) > 8 else 0
-            avg_elapsed = elapsed / execs if execs > 0 else 0
-            sql_table_rows.append((snap_id, sql_id, f"{execs:,}", f"{elapsed:.2f}s",
-                                   f"{cpu:.2f}s", f"{avg_elapsed*1000:.1f}ms",
-                                   f"{buffers:,}", f"{disk_reads:,}", f"{rows:,}"))
-
-        results.append(CheckResult(
-            "AWR耗时SQL", "OK", "已检查",
-            f"AWR 最耗时 SQL（按执行时间排序）",
-            extra_html=generate_data_table(
-                ["快照", "SQL ID", "执行次数", "总耗时", "CPU耗时", "平均耗时",
-                 "逻辑读", "物理读", "处理行数"],
-                sql_table_rows
-            )
-        ))
-
-    return results
+    from parser.advanced_checks import parse_awr
+    return parse_awr(db_dir)
 
 
 def _parse_db_language(db_dir: str) -> CheckResult:
@@ -1308,13 +1843,6 @@ def _parse_tablespaces(db_dir: str) -> List[CheckResult]:
     if not ts_data:
         results.append(CheckResult("表空间使用概览", "CRIT", "数据缺失", "无法获取表空间信息"))
     else:
-        # 展示顺序统一按最大使用率从高到低，便于第一眼识别容量风险。
-        ts_data.sort(key=lambda ts: (-ts["max_pct"], ts["name"]))
-
-        def effective_usage(ts) -> float:
-            """自动扩展文件按最大容量衡量，否则按当前已分配容量衡量。"""
-            return ts["max_pct"] if ts["auto"].upper() == "YES" else ts["alloc_pct"]
-
         # 汇总状态：取所有表空间中最严重的
         worst_status = "OK"
         for ts in ts_data:
@@ -1326,21 +1854,6 @@ def _parse_tablespaces(db_dir: str) -> List[CheckResult]:
                 break
             elif s == "WARN":
                 worst_status = "WARN"
-
-        # 柱状图
-        bar_items = [(ts["name"], effective_usage(ts), "%") for ts in ts_data]
-        bar_html = generate_bar_chart(bar_items,
-                                      warn_threshold=DB_THRESHOLDS["tablespace_usage_warn"],
-                                      crit_threshold=DB_THRESHOLDS["tablespace_usage_crit"])
-
-        # 数据表格
-        table_rows = [(ts["name"], ts["contents"], f"{ts['alloc']:.2f}", f"{ts['used']:.2f}", f"{ts['free']:.2f}",
-                       f"{ts['alloc_pct']:.2f}%", f"{ts['max']:.2f}", f"{ts['max_pct']:.2f}%", ts["auto"], ts["status"])
-                      for ts in ts_data]
-        table_html = generate_data_table(
-            ["表空间", "类型", "已分配(GB)", "已用(GB)", "当前空闲(GB)", "分配使用率", "最大(GB)", "最大使用率", "自动扩展", "状态"],
-            table_rows
-        )
 
         # 建议
         crit_count = sum(1 for ts in ts_data
@@ -1360,7 +1873,7 @@ def _parse_tablespaces(db_dir: str) -> List[CheckResult]:
             f"共 {len(ts_data)} 个表空间；自动扩展=YES 时按最大使用率判定，否则按分配使用率判定"
             + (f"；严重: {crit_count}，警告: {warn_count}" if crit_count or warn_count else ""),
             suggestion,
-            extra_html=bar_html + table_html
+            extra_html=render_tablespace_overview(ts_data)
         )
         results.append(overview)
 
@@ -1597,61 +2110,30 @@ def _parse_operational_risks(db_dir: str) -> List[CheckResult]:
 
 
 def _parse_buffer_cache_hit(db_dir: str) -> CheckResult:
+    from parser.advanced_checks import cache_assessment, number
     content = read_file(f"{db_dir}/buffer_cache_hit.txt")
-    hit_ratio = None
-    data_rows = []
-
-    if content:
-        data_rows = _data_rows(content, ("NAME",))
-        physical_reads = 0.0
-        block_gets = 0.0
-        consistent_gets = 0.0
-        fallback_ratios = []
-        for row in data_rows:
-            if len(row) >= 5:
-                try:
-                    physical_reads += float(row[1])
-                    block_gets += float(row[2])
-                    consistent_gets += float(row[3])
-                    fallback_ratios.append(float(row[4]))
-                except ValueError:
-                    pass
-        logical_reads = block_gets + consistent_gets
-        if logical_reads > 0:
-            hit_ratio = max(0.0, min(100.0, (1 - physical_reads / logical_reads) * 100))
-        elif fallback_ratios:
-            hit_ratio = fallback_ratios[0]
-
-    if hit_ratio is None:
-        return CheckResult("缓冲区命中率", "CRIT", "数据缺失", "无法计算 Buffer Cache Hit Ratio")
-    status = check_threshold_inverse(hit_ratio, DB_THRESHOLDS["buffer_hit_ratio_warn"],
-                                     DB_THRESHOLDS["buffer_hit_ratio_crit"])
-    suggestion = ""
-    if status == "CRIT":
-        suggestion = f"缓冲区命中率仅 {hit_ratio:.1f}%，建议增大 DB_CACHE_SIZE"
-    elif status == "WARN":
-        suggestion = f"缓冲区命中率 {hit_ratio:.1f}% 偏低，建议关注"
-
-    chart = generate_health_percentage(
-        "Buffer Cache Hit Ratio",
-        hit_ratio,
-        DB_THRESHOLDS["buffer_hit_ratio_warn"],
-        DB_THRESHOLDS["buffer_hit_ratio_crit"],
-    )
-    display_rows = []
-    for row in data_rows:
-        formatted = list(row[:5])
-        for index in (1, 2, 3, 4):
-            if len(formatted) > index:
-                formatted[index] = _format_plain_number(formatted[index])
-        display_rows.append(formatted)
-    table = generate_data_table(
-        ["缓冲池", "物理读", "DB Block Gets", "一致性读", "命中率(%)"],
-        display_rows,
-    ) if data_rows else ""
-    return CheckResult("缓冲区命中率", status, f"{hit_ratio:.1f}%",
-                       f"Buffer Cache Hit Ratio: {hit_ratio:.1f}%", suggestion,
-                       extra_html=chart + table)
+    rows = _data_rows(content, ("NAME",))
+    try:
+        if not rows or "ORA-" in content or "SP2-" in content:
+            raise ValueError("未获取有效缓冲池计数")
+        physical = logical = Decimal(0)
+        for row in rows:
+            if len(row) < 5:
+                raise ValueError("缓冲池计数列不完整")
+            physical += number(row[1])
+            logical += number(row[2]) + number(row[3])
+        status, hit_ratio, meaning = cache_assessment(physical, logical)
+    except ValueError as exc:
+        return CheckResult("缓冲区命中率", "UNKNOWN", "无法可靠计算", str(exc))
+    shown = f"{hit_ratio:.1f}%" if hit_ratio is not None else "N/A"
+    table = generate_data_table(["缓冲池", "物理读", "DB Block Gets", "一致性读", "命中率(%)"],
+        [[row[0]] + [_format_plain_number(v) for v in row[1:5]] for row in rows])
+    chart = generate_health_percentage("Buffer Cache Hit Ratio", hit_ratio, DB_THRESHOLDS["buffer_hit_ratio_warn"], -1) if hit_ratio is not None else ""
+    if status == "OK":
+        chart = chart.replace("bar-fill-warn", "bar-fill-ok")
+    return CheckResult("缓冲区命中率", status, shown,
+        "Buffer Cache Hit Ratio: " + shown + "；本地缓冲池累计统计，与 AWR 区间统计的时间范围不同；" + meaning,
+        meaning if status in ("WARN", "UNKNOWN") else "", extra_html=chart + table)
 
 
 def _parse_library_cache_hit(db_dir: str) -> CheckResult:

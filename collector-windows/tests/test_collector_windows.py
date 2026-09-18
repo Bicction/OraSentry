@@ -24,6 +24,18 @@ class WindowsCollectorTests(unittest.TestCase):
         for relative in required:
             self.assertTrue((ROOT / relative).is_file(), relative)
 
+    def test_dataguard_queries_cover_identity_lag_process_gap_and_srl(self):
+        script = (ROOT / "lib" / "DatabaseCheck.ps1").read_text(encoding="utf-8-sig")
+        for filename in (
+            "dataguard_identity.txt", "dataguard_dest_config.txt", "dataguard_dest_health.txt", "dataguard_stats.txt",
+            "dataguard_process.txt", "dataguard_sequence.txt", "dataguard_redo_config.txt",
+            "dataguard_events.txt", "archive_gap.txt",
+        ):
+            self.assertIn(filename, script)
+        self.assertIn("v`$dataguard_process", script)
+        self.assertIn("v`$managed_standby", script)
+        self.assertIn("registrar='RFS'", script)
+
     def test_source_is_windows_powershell_utf8_bom_compatible(self):
         for path in list(ROOT.rglob("*.ps1")) + list(ROOT.rglob("*.psd1")):
             self.assertTrue(path.read_bytes().startswith(b"\xef\xbb\xbf"), path)

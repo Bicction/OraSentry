@@ -1,20 +1,26 @@
-# Build the Windows one-file GUI exe.
+# Build both portable and fast-start Windows releases.
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File tools\build_windows.ps1
 
+param(
+    [string]$PythonExe,
+    [string]$DistDirectory,
+    [switch]$SkipInstall,
+    [switch]$UseUpx
+)
 $ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $ProjectRoot
 
-$Python = $null
-foreach ($candidate in @("python", "py")) {
+$Python = $PythonExe
+if (-not $Python) { foreach ($candidate in @("python", "py")) {
     $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
     if ($cmd) {
         $Python = $cmd.Source
         break
     }
-}
+} }
 if (-not $Python) {
     throw "Python not found. Install Python 3.8+ and add it to PATH."
 }
@@ -27,6 +33,7 @@ if ($LASTEXITCODE -ne 0) {
 
 $Spec = Join-Path $ProjectRoot "tools\oracle_report.spec"
 $Dist = Join-Path $ProjectRoot "dist"
+if ($DistDirectory) { $Dist = [IO.Path]::GetFullPath($DistDirectory) }
 $Work = Join-Path $ProjectRoot "build"
 $StagedDist = Join-Path $Work ("dist-staging-" + [guid]::NewGuid().ToString("N"))
 
@@ -63,11 +70,18 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "Tcl/Tk OK."
 
+if (-not $SkipInstall) {
 Write-Host "Installing pinned report and build dependencies..."
 & $Python -m pip install -r (Join-Path $ProjectRoot "requirements.txt") -r (Join-Path $ProjectRoot "requirements-build.txt")
 if ($LASTEXITCODE -ne 0) {
     throw "Dependency installation failed."
 }
+}
+$PreviousUpx = $env:ORASENTRY_BUILD_UPX
+if ($UseUpx -and -not (Get-Command upx -ErrorAction SilentlyContinue)) {
+    throw "-UseUpx requires upx.exe on PATH; refusing an invalid A/B comparison."
+}
+$env:ORASENTRY_BUILD_UPX = if ($UseUpx) { "1" } else { "0" }
 
 Write-Host "Building exe..."
 try {
@@ -89,10 +103,13 @@ try {
         throw "PyInstaller excluded tkinter; the generated EXE is not a usable GUI build."
     }
 
-    New-Item -ItemType Directory -Path $Dist -Force | Out-Null
-    $Exe = Join-Path $Dist "OracleReport.exe"
-    Copy-Item -LiteralPath $BuiltExe -Destination $Exe -Force
+    $Verification = Join-Path $Work ("release-verification\" + [guid]::NewGuid().ToString("N"))
+    & $Python (Join-Path $PSScriptRoot "verify_release.py") --staging $StagedDist --output $Verification
+    if ($LASTEXITCODE -ne 0) { throw "Frozen release checks failed. Existing distribution was not replaced." }
+    & $Python (Join-Path $PSScriptRoot "publish_release.py") --staging $StagedDist --dist $Dist --backups (Join-Path $Work "release-backups")
+    if ($LASTEXITCODE -ne 0) { throw "Release validation/publication failed." }
 } finally {
+    $env:ORASENTRY_BUILD_UPX = $PreviousUpx
     if (Test-Path -LiteralPath $StagedDist) {
         $StagedFullPath = [IO.Path]::GetFullPath($StagedDist)
         $WorkFullPath = [IO.Path]::GetFullPath($Work).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
@@ -103,11 +120,8 @@ try {
     }
 }
 
-$HashFile = "${Exe}.sha256"
-$Hash = Get-FileHash -LiteralPath $Exe -Algorithm SHA256
-"$($Hash.Hash)  $([IO.Path]::GetFileName($Exe))" | Set-Content -LiteralPath $HashFile -Encoding ascii
-
 Write-Host ""
-Write-Host "Build OK: $Exe"
-Write-Host "SHA256: $HashFile"
-Write-Host "Copy this exe to any Windows PC. Python is not required on the target machine."
+Write-Host "Build OK: $Dist"
+Write-Host "Portable: OracleReport.exe (animated startup screen)"
+Write-Host "Recommended: OracleReport-FastStart.zip (extract entire folder once)"
+Write-Host "Existing releases are preserved in build/release-backups."

@@ -24,6 +24,7 @@ from parser.db_parser import (
     _parse_buffer_cache_hit,
     _parse_control_files,
     _parse_data_files,
+    _parse_dataguard,
     _parse_database_resilience,
     _parse_dead_processes,
     _parse_instance_status,
@@ -98,14 +99,14 @@ class RegressionTests(unittest.TestCase):
     def test_v43_reporter_and_windows_version_are_consistent(self):
         self.assertEqual(APP_VERSION, "4.4")
         version_info = Path(ROOT, "tools", "version_info.txt").read_text(encoding="utf-8")
-        self.assertIn("filevers=(4, 3, 8, 0)", version_info)
+        self.assertIn("filevers=(4, 4, 0, 0)", version_info)
         self.assertIn("ProductVersion', '4.4.0.0'", version_info)
 
     def test_windows_build_stages_exe_without_cleaning_distribution(self):
         script = Path(ROOT, "tools", "build_windows.ps1").read_text(encoding="utf-8-sig")
         self.assertIn("--distpath $StagedDist", script)
         self.assertNotIn("--distpath $Dist", script)
-        self.assertIn("Copy-Item -LiteralPath $BuiltExe -Destination $Exe -Force", script)
+        self.assertIn('"publish_release.py"', script)
 
     def test_collection_integrity_detects_sqlplus_error(self):
         with tempfile.TemporaryDirectory() as td:
@@ -660,6 +661,163 @@ class RegressionTests(unittest.TestCase):
             self.assertEqual(result.value, "2个实例/全部OPEN")
             self.assertIn("orcl1", result.extra_html)
             self.assertIn("orcl2", result.extra_html)
+
+    def test_mounted_physical_standby_is_a_healthy_instance_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._write(
+                td, "instance_status.txt",
+                "INST_ID|INSTANCE_NAME|HOST_NAME|STATUS|DATABASE_STATUS|VERSION|STARTUP_TIME\n"
+                "1|orcl1|db02|MOUNTED|ACTIVE|19.0.0.0.0|2026-09-08 10:00:00\n",
+            )
+            self._write(
+                td, "database_status.txt",
+                "NAME|OPEN_MODE|DATABASE_ROLE|CREATED|LOG_MODE\n"
+                "ORCL|MOUNTED|PHYSICAL STANDBY|2020-01-01|ARCHIVELOG\n",
+            )
+            result = _parse_instance_status(td)
+            self.assertEqual(result.status, "OK")
+            self.assertEqual(result.value, "MOUNTED")
+            self.assertIn("状态与角色匹配", result.detail)
+
+    def test_non_dataguard_primary_is_explicitly_informational(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._write(
+                td, "dataguard_identity.txt",
+                "NAME|DB_UNIQUE_NAME|DATABASE_ROLE|OPEN_MODE|LOG_MODE|FORCE_LOGGING|FLASHBACK_ON|PROTECTION_MODE|PROTECTION_LEVEL|SWITCHOVER_STATUS\n"
+                "ORCL|orcl|PRIMARY|READ WRITE|ARCHIVELOG|YES|NO|MAXIMUM PERFORMANCE|MAXIMUM PERFORMANCE|NOT ALLOWED\n",
+            )
+            self._write(
+                td, "dataguard_dest_health.txt",
+                "DEST_ID|STATUS|TYPE|DATABASE_MODE|RECOVERY_MODE|DB_UNIQUE_NAME|DESTINATION|SYNCHRONIZED|SYNCHRONIZATION_STATUS|GAP_STATUS|ERROR|ARCHIVED_THREAD#|ARCHIVED_SEQ#|APPLIED_THREAD#|APPLIED_SEQ#\n"
+                "1|VALID|LOCAL|OPEN|IDLE||USE_DB_RECOVERY_FILE_DEST|||||1|100||\n",
+            )
+            self._write(td, "dataguard_dest_config.txt", "DEST_ID|STATUS|TARGET|DESTINATION|ERROR\n")
+            results = _parse_dataguard(td)
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].status, "INFO")
+            self.assertIn("未识别Data Guard", results[0].value)
+
+    def test_primary_dataguard_is_detected_from_configured_standby_destination(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._write(
+                td, "dataguard_identity.txt",
+                "NAME|DB_UNIQUE_NAME|DATABASE_ROLE|OPEN_MODE|LOG_MODE|FORCE_LOGGING|FLASHBACK_ON|PROTECTION_MODE|PROTECTION_LEVEL|SWITCHOVER_STATUS\n"
+                "ORCL|orcl|PRIMARY|READ WRITE|ARCHIVELOG|YES|YES|MAXIMUM PERFORMANCE|MAXIMUM PERFORMANCE|TO STANDBY\n",
+            )
+            self._write(td, "dataguard_dest_config.txt", "DEST_ID|STATUS|TARGET|DESTINATION|ERROR\n2|VALID|STANDBY|orcl_stby|\n")
+            self._write(
+                td, "dataguard_dest_health.txt",
+                "DEST_ID|STATUS|TYPE|DATABASE_MODE|RECOVERY_MODE|DB_UNIQUE_NAME|DESTINATION|SYNCHRONIZED|SYNCHRONIZATION_STATUS|GAP_STATUS|ERROR|ARCHIVED_THREAD#|ARCHIVED_SEQ#|APPLIED_THREAD#|APPLIED_SEQ#\n"
+                "2|VALID|PHYSICAL|OPEN_READ-ONLY|MANAGED REAL TIME APPLY|orcl_stby|orcl_stby|NO|CHECK CONFIGURATION|NO GAP||1|100|1|100\n",
+            )
+            self._write(td, "dataguard_stats.txt", "NAME|VALUE|UNIT|TIME_COMPUTED|DATUM_TIME\n")
+            self._write(td, "archive_gap.txt", "THREAD#|LOW_SEQUENCE#|HIGH_SEQUENCE#\n")
+            self._write(td, "dataguard_redo_config.txt", "THREAD#|ONLINE_GROUPS|ONLINE_MIN_MB|STANDBY_GROUPS|STANDBY_MIN_MB\n1|3|1024|0|\n0|0||4|1024\n")
+            self._write(td, "dataguard_events.txt", "TIMESTAMP|FACILITY|SEVERITY|ERROR_CODE|DEST_ID|MESSAGE\n")
+            by_name = {item.name: item for item in _parse_dataguard(td)}
+            self.assertEqual(by_name["DG/ADG部署识别"].value, "Data Guard主库")
+            self.assertEqual(by_name["DG Redo传输"].status, "OK")
+            self.assertEqual(by_name["DG Standby Redo Log"].status, "OK")
+
+    def test_current_primary_does_not_claim_non_dg_when_destination_data_is_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._write(
+                td, "dataguard_identity.txt",
+                "NAME|DB_UNIQUE_NAME|DATABASE_ROLE|OPEN_MODE|LOG_MODE|FORCE_LOGGING|FLASHBACK_ON|PROTECTION_MODE|PROTECTION_LEVEL|SWITCHOVER_STATUS\n"
+                "ORCL|orcl|PRIMARY|READ WRITE|ARCHIVELOG|YES|YES|MAXIMUM PERFORMANCE|MAXIMUM PERFORMANCE|NOT ALLOWED\n",
+            )
+            by_name = {item.name: item for item in _parse_dataguard(td)}
+            self.assertIn("无法判定", by_name["DG/ADG部署识别"].value)
+            self.assertEqual(by_name["DG Redo传输"].status, "UNKNOWN")
+
+    def test_healthy_adg_reports_transport_apply_gap_and_srl(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._write(
+                td, "dataguard_identity.txt",
+                "NAME|DB_UNIQUE_NAME|DATABASE_ROLE|OPEN_MODE|LOG_MODE|FORCE_LOGGING|FLASHBACK_ON|PROTECTION_MODE|PROTECTION_LEVEL|SWITCHOVER_STATUS\n"
+                "ORCL|orcl_stby|PHYSICAL STANDBY|READ ONLY WITH APPLY|ARCHIVELOG|YES|YES|MAXIMUM PERFORMANCE|MAXIMUM PERFORMANCE|NOT ALLOWED\n",
+            )
+            self._write(
+                td, "dataguard_dest_health.txt",
+                "DEST_ID|STATUS|TYPE|DATABASE_MODE|RECOVERY_MODE|DB_UNIQUE_NAME|DESTINATION|SYNCHRONIZED|SYNCHRONIZATION_STATUS|GAP_STATUS|ERROR|ARCHIVED_THREAD#|ARCHIVED_SEQ#|APPLIED_THREAD#|APPLIED_SEQ#\n"
+                "1|VALID|LOCAL|OPEN_READ-ONLY|MANAGED REAL TIME APPLY|orcl_stby|USE_DB_RECOVERY_FILE_DEST|||||1|100|1|100\n",
+            )
+            self._write(
+                td, "dataguard_stats.txt",
+                "NAME|VALUE|UNIT|TIME_COMPUTED|DATUM_TIME\n"
+                "transport lag|+00 00:00:02|day(2) to second(0) interval|09/08/2026 12:00:05|09/08/2026 12:00:03\n"
+                "apply lag|+00 00:00:03|day(2) to second(0) interval|09/08/2026 12:00:05|09/08/2026 12:00:03\n"
+                "apply finish time|+00 00:00:01|day(2) to second(3) interval|09/08/2026 12:00:05|\n",
+            )
+            self._write(
+                td, "dataguard_process.txt",
+                "PROCESS_ROLE|THREAD#|SEQUENCE#|PROCESS_ACTION|CLIENT_PROCESS\n"
+                "recovery logmerger|1|100|APPLYING_LOG|\n",
+            )
+            self._write(td, "archive_gap.txt", "THREAD#|LOW_SEQUENCE#|HIGH_SEQUENCE#\n")
+            self._write(td, "dataguard_sequence.txt", "THREAD#|RECEIVED_SEQ|APPLIED_SEQ|IN_MEMORY_SEQ\n1|100|100|100\n")
+            self._write(td, "dataguard_redo_config.txt", "THREAD#|ONLINE_GROUPS|ONLINE_MIN_MB|STANDBY_GROUPS|STANDBY_MIN_MB\n1|3|1024|4|1024\n")
+            self._write(td, "dataguard_events.txt", "TIMESTAMP|FACILITY|SEVERITY|ERROR_CODE|DEST_ID|MESSAGE\n")
+            by_name = {item.name: item for item in _parse_dataguard(td)}
+            self.assertIn("Active Data Guard", by_name["DG/ADG部署识别"].value)
+            for name in ("DG Redo传输", "DG Redo应用", "DG归档缺口与序列", "DG Standby Redo Log", "DG近24小时事件"):
+                self.assertEqual(by_name[name].status, "OK", name)
+
+    def test_dataguard_failures_are_role_aware_and_critical(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._write(
+                td, "dataguard_identity.txt",
+                "NAME|DB_UNIQUE_NAME|DATABASE_ROLE|OPEN_MODE|LOG_MODE|FORCE_LOGGING|FLASHBACK_ON|PROTECTION_MODE|PROTECTION_LEVEL|SWITCHOVER_STATUS\n"
+                "ORCL|orcl_stby|PHYSICAL STANDBY|READ ONLY|ARCHIVELOG|NO|NO|MAXIMUM AVAILABILITY|MAXIMUM PERFORMANCE|UNRESOLVABLE GAP\n",
+            )
+            self._write(td, "dataguard_dest_health.txt", "DEST_ID|STATUS|TYPE|DATABASE_MODE|RECOVERY_MODE|DB_UNIQUE_NAME|DESTINATION|SYNCHRONIZED|SYNCHRONIZATION_STATUS|GAP_STATUS|ERROR|ARCHIVED_THREAD#|ARCHIVED_SEQ#|APPLIED_THREAD#|APPLIED_SEQ#\n")
+            self._write(
+                td, "dataguard_stats.txt",
+                "NAME|VALUE|UNIT|TIME_COMPUTED|DATUM_TIME\n"
+                "transport lag|+00 00:31:00||09/08/2026 12:40:00|09/08/2026 12:00:00\n"
+                "apply lag|+00 00:45:00||09/08/2026 12:40:00|09/08/2026 12:00:00\n",
+            )
+            self._write(td, "dataguard_process.txt", "PROCESS_ROLE|THREAD#|SEQUENCE#|PROCESS_ACTION|CLIENT_PROCESS\n")
+            self._write(td, "archive_gap.txt", "THREAD#|LOW_SEQUENCE#|HIGH_SEQUENCE#\n1|101|105\n")
+            self._write(td, "dataguard_sequence.txt", "THREAD#|RECEIVED_SEQ|APPLIED_SEQ|IN_MEMORY_SEQ\n1|110|100|\n")
+            self._write(td, "dataguard_redo_config.txt", "THREAD#|ONLINE_GROUPS|ONLINE_MIN_MB|STANDBY_GROUPS|STANDBY_MIN_MB\n1|3|1024|2|512\n")
+            self._write(td, "dataguard_events.txt", "TIMESTAMP|FACILITY|SEVERITY|ERROR_CODE|DEST_ID|MESSAGE\n2026-09-08 12:00:00|Log Apply Services|Error|16766|0|apply stopped\n")
+            by_name = {item.name: item for item in _parse_dataguard(td)}
+            for name in ("DG保护模式与切换状态", "DG Redo传输", "DG Redo应用", "DG归档缺口与序列", "DG近24小时事件"):
+                self.assertEqual(by_name[name].status, "CRIT", name)
+            self.assertEqual(by_name["DG Standby Redo Log"].status, "WARN")
+
+    def test_dataguard_category_reaches_html_and_docx_reports(self):
+        with tempfile.TemporaryDirectory() as td:
+            raw = Path(td, "raw")
+            db = raw / "db"
+            db.mkdir(parents=True)
+            self._write(raw, "env.info", "schema_version=4.3\nplatform=linux\ncheck_type=db\nhostname=db02\noracle_sid=ORCL\ntimestamp=20260908_120000\n")
+            self._write(raw, "collection_manifest.tsv", "item\ttype\tstatus\texit_code\tmessage\n")
+            self._write(
+                db, "dataguard_identity.txt",
+                "NAME|DB_UNIQUE_NAME|DATABASE_ROLE|OPEN_MODE|LOG_MODE|FORCE_LOGGING|FLASHBACK_ON|PROTECTION_MODE|PROTECTION_LEVEL|SWITCHOVER_STATUS\n"
+                "ORCL|orcl_stby|PHYSICAL STANDBY|READ ONLY WITH APPLY|ARCHIVELOG|YES|YES|MAXIMUM PERFORMANCE|MAXIMUM PERFORMANCE|NOT ALLOWED\n",
+            )
+            self._write(db, "dataguard_dest_config.txt", "DEST_ID|STATUS|TARGET|DESTINATION|ERROR\n")
+            self._write(db, "dataguard_dest_health.txt", "DEST_ID|STATUS|TYPE|DATABASE_MODE|RECOVERY_MODE|DB_UNIQUE_NAME|DESTINATION|SYNCHRONIZED|SYNCHRONIZATION_STATUS|GAP_STATUS|ERROR|ARCHIVED_THREAD#|ARCHIVED_SEQ#|APPLIED_THREAD#|APPLIED_SEQ#\n")
+            self._write(db, "dataguard_stats.txt", "NAME|VALUE|UNIT|TIME_COMPUTED|DATUM_TIME\ntransport lag|+00 00:00:01||09/08/2026 12:00:02|09/08/2026 12:00:01\napply lag|+00 00:00:01||09/08/2026 12:00:02|09/08/2026 12:00:01\n")
+            self._write(db, "dataguard_process.txt", "PROCESS_ROLE|THREAD#|SEQUENCE#|PROCESS_ACTION|CLIENT_PROCESS\nmanaged recovery|1|100|APPLYING_LOG|\n")
+            self._write(db, "archive_gap.txt", "THREAD#|LOW_SEQUENCE#|HIGH_SEQUENCE#\n")
+            self._write(db, "dataguard_sequence.txt", "THREAD#|RECEIVED_SEQ|APPLIED_SEQ|IN_MEMORY_SEQ\n1|100|100|100\n")
+            self._write(db, "dataguard_redo_config.txt", "THREAD#|ONLINE_GROUPS|ONLINE_MIN_MB|STANDBY_GROUPS|STANDBY_MIN_MB\n1|3|1024|4|1024\n")
+            self._write(db, "dataguard_events.txt", "TIMESTAMP|FACILITY|SEVERITY|ERROR_CODE|DEST_ID|MESSAGE\n")
+            report = build_report([str(raw)], str(Path(td, "dg_report.html")))
+            html_report = Path(report.html).read_text(encoding="utf-8")
+            self.assertIn("Data Guard / Active Data Guard", html_report)
+            self.assertIn("Active Data Guard实时查询", html_report)
+            document = Document(report.docx)
+            word_text = "\n".join(
+                [paragraph.text for paragraph in document.paragraphs]
+                + [cell.text for table in document.tables for row in table.rows for cell in row.cells]
+            )
+            self.assertIn("Data Guard / Active Data Guard", word_text)
+            self.assertIn("Active Data Guard实时查询", word_text)
 
     def test_data_file_no_autoextend_is_highlighted(self):
         with tempfile.TemporaryDirectory() as td:

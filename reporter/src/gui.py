@@ -1287,6 +1287,7 @@ class ReportApp:
 
 
 def main():
+    import startup
     _enable_windows_dpi()
     if TkinterDnD is not None:
         try:
@@ -1295,8 +1296,30 @@ def main():
             root = tk.Tk()
     else:
         root = tk.Tk()
-    ReportApp(root)
-    root.mainloop()
+    root.withdraw()
+    startup.mark("tk_created")
+    try:
+        app = ReportApp(root)
+        startup.mark("ui_built")
+        root.update_idletasks()
+        root.deiconify()
+
+        def ready():
+            startup.close_splash()
+            startup.mark("ready", drag_drop=bool(getattr(root, "TkdndVersion", None)))
+            # Used by the repeatable startup benchmark; normal launches stay open.
+            delay = os.environ.get("ORASENTRY_AUTOCLOSE_MS", "")
+            if delay.isdigit():
+                root.after(max(100, int(delay)), root.destroy)
+
+        root.after_idle(ready)
+        root.mainloop()
+    finally:
+        startup.close_splash()
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
 
 
 if __name__ == "__main__":

@@ -277,6 +277,18 @@ printf 'SELECT 1 FROM dual;\nEXIT\n' | db_sqlplus -L -S
             db_script,
         )
 
+    def test_dataguard_collection_covers_identity_lag_process_gap_and_srl(self):
+        db_script = (ROOT / "lib" / "db_check.sh").read_text(encoding="utf-8")
+        for filename in (
+            "dataguard_identity.txt", "dataguard_dest_config.txt", "dataguard_dest_health.txt", "dataguard_stats.txt",
+            "dataguard_process.txt", "dataguard_sequence.txt", "dataguard_redo_config.txt",
+            "dataguard_events.txt", "archive_gap.txt",
+        ):
+            self.assertIn(filename, db_script)
+        self.assertIn("v\\$dataguard_process", db_script)
+        self.assertIn("v\\$managed_standby", db_script)
+        self.assertIn("registrar='RFS'", db_script)
+
     def test_alert_log_does_not_fall_back_to_background_dump_dest(self):
         db_script = (ROOT / "lib" / "db_check.sh").read_text(encoding="utf-8")
         alert_section = db_script[db_script.index("collect_alert_log()") : db_script.index("# 跟踪文件")]

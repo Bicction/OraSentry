@@ -5,6 +5,7 @@ The catalog prioritizes operationally useful errors but is not the complete
 Oracle namespace. A code alone does not prove a root cause or a specific fix.
 """
 import copy
+import gzip
 import json
 import re
 import sys
@@ -26,7 +27,9 @@ class CatalogError(ValueError):
 
 def _catalog_path():
     if getattr(sys, "frozen", False) and getattr(sys, "_MEIPASS", None):
-        return Path(sys._MEIPASS) / "resources" / "ora" / "catalog.json"
+        folder = Path(sys._MEIPASS) / "resources" / "ora"
+        compressed = folder / "catalog.json.gz"
+        return compressed if compressed.is_file() else folder / "catalog.json"
     return Path(__file__).resolve().parents[1] / "resources" / "ora" / "catalog.json"
 
 
@@ -98,9 +101,10 @@ def _read_catalog(path, mtime_ns, size):
     # File metadata is part of the cache key, so a replacement is noticed.
     del mtime_ns, size
     try:
-        with open(path, "r", encoding="utf-8-sig") as source:
+        opener = gzip.open if str(path).endswith(".gz") else open
+        with opener(path, "rt", encoding="utf-8-sig") as source:
             catalog = json.load(source)
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (OSError, EOFError, UnicodeError, json.JSONDecodeError) as exc:
         raise CatalogError("ORA 词典无法读取: %s (%s)" % (path, exc)) from exc
     return _deduplicate_catalog_strings(_validate_catalog(catalog))
 

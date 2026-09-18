@@ -96,6 +96,7 @@ def parse_windows_host(raw_dir: str) -> List[CheckResult]:
 
 
 def _parse_disks(host_dir: str) -> List[CheckResult]:
+    from parser.disk_capacity import assess_disk_capacity
     rows = _table(f"{host_dir}/disk_usage.txt")
     if not rows:
         return [CheckResult("磁盘使用率", "CRIT", "数据缺失", "无法获取 Windows 固定磁盘信息")]
@@ -105,11 +106,7 @@ def _parse_disks(host_dir: str) -> List[CheckResult]:
         volume = row.get("VOLUME", "?")
         usage = _number(row.get("USAGE_PCT"))
         free_gb = _number(row.get("FREE_GB"))
-        status = check_threshold(usage, HOST_THRESHOLDS["disk_usage_warn"], HOST_THRESHOLDS["disk_usage_crit"])
-        if free_gb <= HOST_THRESHOLDS["disk_free_crit"]:
-            status = "CRIT"
-        elif free_gb <= HOST_THRESHOLDS["disk_free_warn"] and status == "OK":
-            status = "WARN"
+        status, _ = assess_disk_capacity(usage, _number(row.get("TOTAL_GB")), free_gb)
         suggestion = f"卷 {volume} 空间偏低，请清理、迁移诊断文件或扩容" if status != "OK" else ""
         results.append(CheckResult(
             f"磁盘使用率-{volume}", status, f"{usage:.1f}%",

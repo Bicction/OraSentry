@@ -17,6 +17,8 @@ collector-linux/
 
 ## 环境要求
 
+主机巡检发现 `grid` 用户时，会使用其登录环境执行 Grid/RAC 只读状态检查，结果写入 `host/grid_rac.txt`。建议以 root 运行以便切换用户；不存在 grid 时标记不适用，权限不足或命令超时明确标记未完整采集。Grid Home 优先取 grid 的环境，其次读取 `/etc/oracle/olr.loc`，再尝试 PATH 中的 crsctl。不会启动、停止或切换集群资源。
+
 - RHEL、CentOS 或 Oracle Linux
 - Bash 4+
 - Oracle 11g 至 23ai
@@ -79,6 +81,7 @@ output/raw/db_check_<SID>_<timestamp>.tar.gz
 - 单项失败会记录到清单并使主程序返回非零退出码，但仍保留并打包已收集的数据。
 - `CHECK_AWR` 和 `COLLECT_SQL_TEXT` 默认关闭；启用前需确认授权和数据处理要求。
 - 实例状态通过 `GV$INSTANCE` 采集全部实例；Alert Log 仍只读取当前 `ORACLE_SID` 对应物理日志的最后 100000 行，并在其中提取最近30天内容及实际首末时间。
+- Data Guard 巡检采集数据库角色、保护模式、Redo 传输/应用延迟、MRP/RFS 进程、归档缺口、每线程序列进度、Standby Redo Log 和最近 24 小时异常事件；12.2 及以上优先使用 `V$DATAGUARD_PROCESS`，旧版本回退 `V$MANAGED_STANDBY`。
 
 ## 验证
 

@@ -375,6 +375,11 @@ SELECT 'HAS_ROLES_ORACLE_MAINTAINED|' || CASE WHEN COUNT(*) > 0 THEN 'YES' ELSE 
 SELECT 'HAS_SERVICES_PDB|' || CASE WHEN COUNT(*) > 0 THEN 'YES' ELSE 'NO' END FROM dba_tab_columns WHERE owner='SYS' AND table_name='DBA_SERVICES' AND column_name='PDB';
 SELECT 'HAS_SERVICES_GLOBAL|' || CASE WHEN COUNT(*) > 0 THEN 'YES' ELSE 'NO' END FROM dba_tab_columns WHERE owner='SYS' AND table_name='DBA_SERVICES' AND column_name='GLOBAL_SERVICE';
 SELECT 'HAS_UNIFIED_AUDIT_VIEW|' || CASE WHEN COUNT(*) > 0 THEN 'YES' ELSE 'NO' END FROM dba_objects WHERE owner='SYS' AND object_name='AUDIT_UNIFIED_ENABLED_POLICIES' AND object_type='VIEW';
+SELECT 'DB_ROLE|' || database_role FROM v\$database;
+SELECT 'DB_OPEN_MODE|' || open_mode FROM v\$database;
+SELECT 'DB_UNIQUE_NAME|' || db_unique_name FROM v\$database;
+SELECT 'HAS_DATAGUARD_PROCESS|' || CASE WHEN COUNT(*) > 0 THEN 'YES' ELSE 'NO' END FROM dba_objects WHERE owner='SYS' AND object_name='V_\$DATAGUARD_PROCESS';
+SELECT 'HAS_DG_DEST_EXT|' || CASE WHEN COUNT(DISTINCT column_name) = 6 THEN 'YES' ELSE 'NO' END FROM dba_tab_columns WHERE owner='SYS' AND table_name='V_\$ARCHIVE_DEST_STATUS' AND column_name IN ('DB_UNIQUE_NAME','SYNCHRONIZED','SYNCHRONIZATION_STATUS','GAP_STATUS','APPLIED_THREAD#','APPLIED_SEQ#');
 EXIT
 EOF
 )
@@ -405,6 +410,11 @@ EOF
     export HAS_SERVICES_PDB="NO"
     export HAS_SERVICES_GLOBAL="NO"
     export HAS_UNIFIED_AUDIT_VIEW="NO"
+    export DB_ROLE=""
+    export DB_OPEN_MODE=""
+    export DB_UNIQUE_NAME=""
+    export HAS_DATAGUARD_PROCESS="NO"
+    export HAS_DG_DEST_EXT="NO"
 
     local key value
     while IFS='|' read -r key value; do
@@ -412,7 +422,10 @@ EOF
         value=$(echo "${value}" | xargs)
         case "${key}" in
             DB_VERSION) DB_FULL_VERSION="${value}" ;;
-            HAS_VDATABASE_CDB|HAS_DBA_PDBS|HAS_TEMPSEG_CON_ID|HAS_USERS_LAST_LOGIN|HAS_USERS_AUTH_TYPE|HAS_USERS_PASSWORD_VERSIONS|HAS_USERS_ORACLE_MAINTAINED|HAS_USERS_COMMON|HAS_ROLES_ORACLE_MAINTAINED|HAS_SERVICES_PDB|HAS_SERVICES_GLOBAL|HAS_UNIFIED_AUDIT_VIEW)
+            HAS_VDATABASE_CDB|HAS_DBA_PDBS|HAS_TEMPSEG_CON_ID|HAS_USERS_LAST_LOGIN|HAS_USERS_AUTH_TYPE|HAS_USERS_PASSWORD_VERSIONS|HAS_USERS_ORACLE_MAINTAINED|HAS_USERS_COMMON|HAS_ROLES_ORACLE_MAINTAINED|HAS_SERVICES_PDB|HAS_SERVICES_GLOBAL|HAS_UNIFIED_AUDIT_VIEW|HAS_DATAGUARD_PROCESS|HAS_DG_DEST_EXT)
+                export "${key}=${value}"
+                ;;
+            DB_ROLE|DB_OPEN_MODE|DB_UNIQUE_NAME)
                 export "${key}=${value}"
                 ;;
         esac
@@ -441,8 +454,11 @@ EOF
         echo "db_version=${DB_FULL_VERSION}"
         echo "db_major_version=${DB_MAJOR_VERSION}"
         echo "db_is_cdb=${DB_IS_CDB}"
+        echo "db_role=${DB_ROLE}"
+        echo "db_open_mode=${DB_OPEN_MODE}"
+        echo "db_unique_name=${DB_UNIQUE_NAME}"
     } >> "${RAW_DIR}/env.info"
-    log_info "数据库版本=${DB_FULL_VERSION}, CDB=${DB_IS_CDB}"
+    log_info "数据库版本=${DB_FULL_VERSION}, CDB=${DB_IS_CDB}, 角色=${DB_ROLE}, 打开模式=${DB_OPEN_MODE}"
 }
 
 # 对当前版本或数据库架构不适用的 SQL 项生成只有表头的结果文件，并在

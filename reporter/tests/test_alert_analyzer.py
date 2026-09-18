@@ -168,6 +168,13 @@ class AlertAnalyzerTests(unittest.TestCase):
                  "2026-08-01T12:00:01Z\nORA-01653: unable to extend table B.T by 8 in tablespace TS2\n")
         self.assertEqual(len(analyze_alert_directory(self.db).findings), 2)
 
+    def test_01688_keeps_partition_failures_separate(self):
+        self.raw('2026-08-01T12:00:00Z\nORA-01688: unable to extend table A.T partition P1 by 8 in tablespace USERS\n'
+                 '2026-08-01T12:00:01Z\nORA-01688: unable to extend table A.T partition P2 by 8 in tablespace USERS\n')
+        findings=analyze_alert_directory(self.db).findings
+        self.assertEqual(len(findings),2)
+        self.assertTrue(all(f.code=='ORA-01688' and f.severity=='CRIT' for f in findings))
+
     def test_missing_catalog_does_not_make_log_disappear(self):
         self.raw("2026-08-01T12:00:00Z\nORA-01578: data block corrupted\n")
         with patch("alert_analyzer.catalog_metadata", side_effect=ValueError("invalid schema")):
@@ -186,7 +193,7 @@ class AlertAnalyzerTests(unittest.TestCase):
     def test_catalog_version_hides_entry_count_and_phase_label(self):
         self.raw("2026-08-01T12:00:00Z\nORA-01578: data block corrupted\n")
         rendered = build_alert_check(self.db).extra_html
-        self.assertIn("2026.09.07-v3", rendered)
+        self.assertIn("2026.09.17-v3.1", rendered)
         self.assertNotIn("个词条", rendered)
         self.assertNotIn("首版常见错误", rendered)
 

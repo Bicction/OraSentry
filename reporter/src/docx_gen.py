@@ -4,6 +4,7 @@ import datetime
 import os
 import re
 import subprocess
+from copy import deepcopy
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -240,7 +241,8 @@ def _iter_document_paragraphs(document: Document) -> Iterable:
                 yield from _iter_table_paragraphs(table)
 
 
-def _normalize_document_fonts(document: Document, cover_project_name: str = "") -> None:
+def _normalize_document_fonts(document: Document, cover_project_name: str = "",
+                              cancellation_check=None) -> None:
     """全文强制中文宋体、英文数字 Times New Roman，去掉主题字体残留。"""
     _set_document_default_fonts(document)
     for style in document.styles:
@@ -250,12 +252,28 @@ def _normalize_document_fonts(document: Document, cover_project_name: str = "") 
         fonts = getattr(rpr, "rFonts", None)
         if fonts is not None:
             _apply_bilingual_fonts(fonts)
-    for paragraph in _iter_document_paragraphs(document):
-        for run in paragraph.runs:
-            if cover_project_name and paragraph.text == cover_project_name:
-                _set_simsun_run_font(run)
-            else:
-                _set_run_font(run)
+    # Traverse physical XML runs once. Python table/paragraph wrappers repeatedly
+    # reconstruct cell grids and text, which is expensive for long inventories.
+    roots = [document.element]
+    for section in document.sections:
+        for part in (section.header, section.footer):
+            if part._element not in roots:
+                roots.append(part._element)
+    for root in roots:
+        for index, run in enumerate(root.iter(qn('w:r'))):
+            if cancellation_check and index % 128 == 0:
+                cancellation_check()
+            _apply_bilingual_fonts(run.get_or_add_rPr().get_or_add_rFonts())
+        if cover_project_name:
+            for paragraph in root.iter(qn('w:p')):
+                if ''.join(t.text or '' for t in paragraph.iter(qn('w:t'))) != cover_project_name:
+                    continue
+                for run in paragraph.iter(qn('w:r')):
+                    rpr = run.get_or_add_rPr()
+                    fonts = rpr.get_or_add_rFonts()
+                    for attribute in ('ascii', 'hAnsi', 'cs', 'eastAsia'):
+                        fonts.set(qn('w:'+attribute), EAST_ASIA_FONT)
+                    rpr.get_or_add_i().val = False
 
 
 def _configure_page(section) -> None:
@@ -401,7 +419,7 @@ def _format_collect_time(value) -> str:
 
 
 def _report_title(results) -> str:
-    if any(category in results for category in ("db", "cdb", "rac", "security")):
+    if any(category in results for category in ("db", "dg", "cdb", "rac", "security")):
         return REPORT_CONFIG["title_db"]
     if "host" in results:
         return REPORT_CONFIG["title_host"]
@@ -539,7 +557,7 @@ def _add_toc(document: Document, results: Dict[str, List[CheckResult]]) -> None:
     heading = _add_heading(document, "目录", 1)
     _add_bookmark(heading, "report_toc", 1)
 
-    note = document.add_paragraph("点击目录项可直接跳转到对应巡检章节。")
+    note = document.add_paragraph("点击目录项可直接跳转到对应巡检章节；如需更新页码，可在 Word 中全选后按 F9。")
     note.runs[0].font.color.rgb = RGBColor.from_string(COLORS["muted"])
 
     categories = _ordered_categories(results)
@@ -711,26 +729,36 @@ def _set_repeat_table_header(row) -> None:
     tr_pr.append(tbl_header)
 
 
-def _add_word_table(document: Document, rows: List[List[str]]) -> None:
+def _add_word_table(document: Document, rows: List[List[str]],
+                    cancellation_check: Optional[Callable[[], None]] = None) -> None:
     if not rows:
         return
     width = max(len(row) for row in rows)
     normalized = [row + [""] * (width - len(row)) for row in rows]
-    table = document.add_table(rows=len(normalized), cols=width)
+    table = document.add_table(rows=1, cols=width)
     table.style = "Table Grid"
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     table.autofit = True
     font_size = 7.5 if width >= 7 else 8.5 if width >= 5 else 9
+    # Format two prototype cells, then clone their XML. Reapplying font, color,
+    # alignment and spacing through python-docx for every cell dominates runtime.
+    prototype = table.cell(0, 0)
+    _set_cell_shading(prototype, COLORS['header'])
+    _set_cell_text(prototype, '', bold=True, color=COLORS['navy'], size=font_size)
+    header_cell = deepcopy(prototype._tc)
+    prototype._tc.get_or_add_tcPr().remove(prototype._tc.tcPr.find(qn('w:shd')))
+    _set_cell_text(prototype, '', color=COLORS['text'], size=font_size)
+    body_cell = deepcopy(prototype._tc)
+    table._tbl.remove(table.rows[0]._tr)
     for row_index, values in enumerate(normalized):
-        for col_index, value in enumerate(values):
-            cell = table.cell(row_index, col_index)
-            if row_index == 0:
-                _set_cell_shading(cell, COLORS["header"])
-            _set_cell_text(
-                cell, value, bold=row_index == 0,
-                color=COLORS["navy"] if row_index == 0 else COLORS["text"],
-                size=font_size,
-            )
+        if cancellation_check:
+            cancellation_check()
+        row = OxmlElement('w:tr')
+        for value in values:
+            cell = deepcopy(header_cell if row_index == 0 else body_cell)
+            cell.p_lst[0].r_lst[0].text = str(value if value is not None else '')
+            row.append(cell)
+        table._tbl.append(row)
     _set_repeat_table_header(table.rows[0])
     document.add_paragraph().paragraph_format.space_after = Pt(1)
 
@@ -754,11 +782,14 @@ def _add_visual_bar(document: Document, label: str, value: str, status: str) -> 
     value_run.bold = True
 
 
-def _render_extra_blocks(document: Document, extra_html: str) -> None:
+def _render_extra_blocks(document: Document, extra_html: str,
+                         cancellation_check: Optional[Callable[[], None]] = None) -> None:
     for block in parse_extra_html(extra_html):
+        if cancellation_check:
+            cancellation_check()
         kind = block[0]
         if kind == "table":
-            _add_word_table(document, block[1])
+            _add_word_table(document, block[1], cancellation_check)
         elif kind == "subtitle":
             _add_heading(document, block[1], 3)
         elif kind == "note":
@@ -792,7 +823,7 @@ def _add_status_table(document: Document, item: CheckResult) -> None:
 
 
 def _add_check_item(document: Document, category_index: int, item_index: int,
-                    item: CheckResult) -> None:
+                    item: CheckResult, cancellation_check=None) -> None:
     heading = _add_heading(document, f"{category_index}.{item_index}  {item.name}", 2)
     _add_bookmark(
         heading,
@@ -812,7 +843,7 @@ def _add_check_item(document: Document, category_index: int, item_index: int,
         _set_cell_text(table.cell(0, 0), item.suggestion, color=COLORS["WARN"], size=9.5)
     if item.extra_html:
         _add_heading(document, "巡检明细", 3)
-        _render_extra_blocks(document, item.extra_html)
+        _render_extra_blocks(document, item.extra_html, cancellation_check)
 
 
 def _add_report_summary_chapter(document: Document, section_index: int,
@@ -911,7 +942,7 @@ def generate_docx_report(results: Dict[str, List[CheckResult]], env_info: dict,
         for item_index, item in enumerate(results[category], start=1):
             if cancellation_check:
                 cancellation_check()
-            _add_check_item(document, category_index, item_index, item)
+            _add_check_item(document, category_index, item_index, item, cancellation_check)
             rendered_count += 1
 
     if cancellation_check:
@@ -926,9 +957,10 @@ def generate_docx_report(results: Dict[str, List[CheckResult]], env_info: dict,
     document.core_properties.subject = "Oracle 数据库与主机巡检报告"
     document.core_properties.author = REPORT_CONFIG["brand"]
     document.core_properties.keywords = "Oracle, Inspection, Database, Security"
-    _normalize_document_fonts(document, project_name)
+    _normalize_document_fonts(document, project_name, cancellation_check)
     if cancellation_check:
         cancellation_check()
     document.save(str(output_path))
-    _cache_toc_page_numbers(output_path)
+    if REPORT_CONFIG.get('word_cache_page_numbers', False):
+        _cache_toc_page_numbers(output_path)
     return rendered_count

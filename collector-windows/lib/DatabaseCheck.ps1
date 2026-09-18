@@ -1,8 +1,30 @@
 ﻿Set-StrictMode -Version 2.0
 
 function Get-DatabaseQueries {
-    param([bool]$CollectSqlText)
+    param(
+        [bool]$CollectSqlText,
+        [bool]$HasDgDestExt = $false,
+        [bool]$HasDgProcess = $false
+    )
     $sqlText = if ($CollectSqlText) { "SUBSTR(REPLACE(REPLACE(sql_text, CHR(10), ' '), CHR(13), ' '), 1, 1000) sql_text" } else { "CAST(NULL AS VARCHAR2(1)) sql_text" }
+    $destUnique = if ($HasDgDestExt) { "db_unique_name" } else { "CAST(NULL AS VARCHAR2(30)) db_unique_name" }
+    $synchronized = if ($HasDgDestExt) { "synchronized" } else { "CAST(NULL AS VARCHAR2(3)) synchronized" }
+    $syncStatus = if ($HasDgDestExt) { "synchronization_status" } else { "CAST(NULL AS VARCHAR2(22)) synchronization_status" }
+    $gapStatus = if ($HasDgDestExt) { "gap_status" } else { "CAST(NULL AS VARCHAR2(24)) gap_status" }
+    $appliedThread = if ($HasDgDestExt) { "applied_thread#" } else { "CAST(NULL AS NUMBER) applied_thread#" }
+    $appliedSeq = if ($HasDgDestExt) { "applied_seq#" } else { "CAST(NULL AS NUMBER) applied_seq#" }
+    $dgProcessSql = if ($HasDgProcess) {
+        "SELECT role process_role, thread#, sequence#, action process_action, CAST(NULL AS VARCHAR2(16)) client_process FROM v`$dataguard_process ORDER BY role, thread#, sequence#;"
+    } else {
+        "SELECT process process_role, thread#, sequence#, status process_action, client_process FROM v`$managed_standby ORDER BY process, thread#, sequence#;"
+    }
+    $dgClusterProcessSql = if ($HasDgProcess) {
+        "SELECT i.inst_id, i.instance_name, i.host_name, p.role process_role, p.thread#, p.sequence#, p.action process_action, CAST(NULL AS VARCHAR2(16)) client_process, TO_CHAR(SYSDATE,'YYYY-MM-DD HH24:MI:SS') collected_at FROM gv`$instance i LEFT JOIN gv`$dataguard_process p ON p.inst_id=i.inst_id ORDER BY i.inst_id, p.role, p.thread#, p.sequence#;
+SELECT 'DG_CLUSTER_OK' dg_marker FROM dual;"
+    } else {
+        "SELECT i.inst_id, i.instance_name, i.host_name, p.process process_role, p.thread#, p.sequence#, p.status process_action, p.client_process client_process, TO_CHAR(SYSDATE,'YYYY-MM-DD HH24:MI:SS') collected_at FROM gv`$instance i LEFT JOIN gv`$managed_standby p ON p.inst_id=i.inst_id ORDER BY i.inst_id, p.process, p.thread#, p.sequence#;
+SELECT 'DG_CLUSTER_OK' dg_marker FROM dual;"
+    }
     $queries = [ordered]@{
         "db_version.txt" = "SELECT * FROM v`$version;"
         "spfile.txt" = "SELECT name, value, isspecified FROM v`$spparameter WHERE isspecified='TRUE' ORDER BY name;"
@@ -10,11 +32,23 @@ function Get-DatabaseQueries {
         "instance_status.txt" = "SELECT inst_id, instance_name, host_name, status, database_status, version, startup_time FROM gv`$instance ORDER BY inst_id;"
         "database_status.txt" = "SELECT name, open_mode, database_role, created, log_mode FROM v`$database;"
         "db_resilience.txt" = "SELECT force_logging, flashback_on, supplemental_log_data_min, database_role, protection_mode, protection_level, switchover_status FROM v`$database;"
+        "dataguard_identity.txt" = "SELECT name, db_unique_name, database_role, open_mode, log_mode, force_logging, flashback_on, protection_mode, protection_level, switchover_status FROM v`$database;"
+        "dataguard_dest_config.txt" = "SELECT dest_id, status, target, destination, error FROM v`$archive_dest WHERE target='STANDBY' ORDER BY dest_id;"
         "registry_components.txt" = "SELECT comp_id, comp_name, version, status, modified FROM dba_registry ORDER BY comp_id;"
         "datafile_recovery.txt" = "SELECT r.file#, d.name, r.error, r.online_status, r.change#, r.time FROM v`$recover_file r JOIN v`$datafile d ON d.file#=r.file# ORDER BY r.file#;"
         "block_corruption.txt" = "SELECT file#, block#, blocks, corruption_change#, corruption_type FROM v`$database_block_corruption ORDER BY file#, block#;"
         "dataguard_dest_status.txt" = "SELECT dest_id, status, type, database_mode, recovery_mode, destination, error, archived_thread#, archived_seq# FROM v`$archive_dest_status WHERE status <> 'INACTIVE' ORDER BY dest_id;"
+        "dataguard_dest_health.txt" = "SELECT dest_id, status, type, database_mode, recovery_mode, $destUnique, destination, $synchronized, $syncStatus, $gapStatus, error, archived_thread#, archived_seq#, $appliedThread, $appliedSeq FROM v`$archive_dest_status WHERE status <> 'INACTIVE' ORDER BY dest_id;"
+        "dataguard_stats.txt" = "SELECT name, value, unit, time_computed, datum_time FROM v`$dataguard_stats ORDER BY name;"
+        "dataguard_process.txt" = $dgProcessSql
+        "dataguard_context.txt" = "SELECT instance_number inst_id, instance_name, host_name, (SELECT value FROM v`$parameter WHERE name='cluster_database') cluster_database, TO_CHAR(SYSDATE,'YYYY-MM-DD HH24:MI:SS') collected_at FROM v`$instance;"
+        "dataguard_cluster_stats.txt" = "SELECT inst_id, name, value, unit, time_computed, datum_time, TO_CHAR(SYSDATE,'YYYY-MM-DD HH24:MI:SS') collected_at FROM gv`$dataguard_stats ORDER BY inst_id, name;
+SELECT 'DG_STATS_OK' dg_marker FROM dual;"
+        "dataguard_cluster_process.txt" = $dgClusterProcessSql
         "archive_gap.txt" = "SELECT thread#, low_sequence#, high_sequence# FROM v`$archive_gap ORDER BY thread#, low_sequence#;"
+        "dataguard_sequence.txt" = "SELECT thread#, MAX(sequence#) received_seq, MAX(CASE WHEN applied='YES' THEN sequence# END) applied_seq, MAX(CASE WHEN applied='IN-MEMORY' THEN sequence# END) in_memory_seq FROM v`$archived_log WHERE registrar='RFS' AND resetlogs_change#=(SELECT resetlogs_change# FROM v`$database) GROUP BY thread# ORDER BY thread#;"
+        "dataguard_redo_config.txt" = "SELECT NVL(o.thread#,s.thread#) thread#, NVL(o.online_groups,0) online_groups, o.online_min_mb, NVL(s.standby_groups,0) standby_groups, s.standby_min_mb FROM (SELECT thread#,COUNT(*) online_groups,ROUND(MIN(bytes)/1024/1024,2) online_min_mb FROM v`$log GROUP BY thread#) o FULL OUTER JOIN (SELECT thread#,COUNT(*) standby_groups,ROUND(MIN(bytes)/1024/1024,2) standby_min_mb FROM v`$standby_log GROUP BY thread#) s ON s.thread#=o.thread# ORDER BY 1;"
+        "dataguard_events.txt" = "SELECT timestamp, facility, severity, error_code, dest_id, message FROM v`$dataguard_status WHERE timestamp > SYSDATE-1 AND severity IN ('Warning','Error','Fatal') ORDER BY timestamp DESC;"
         "rac_nodes.txt" = "SELECT inst_id, instance_number, instance_name, host_name, status, database_status, instance_role, startup_time, version FROM gv`$instance ORDER BY inst_id;"
         "rac_services.txt" = "SELECT name, network_name, creation_date, enabled, goal, failover_method, failover_type FROM dba_services ORDER BY name;"
         "nls_params.txt" = "SELECT parameter, value FROM nls_database_parameters ORDER BY parameter;"
@@ -216,9 +250,26 @@ function Collect-WindowsDatabase {
         try { $isCdb = (Invoke-OraScalar $Context "SELECT CDB FROM v`$database;").Trim().ToUpperInvariant() } catch { $isCdb = "NO" }
     }
     if ($isCdb -ne "YES") { $isCdb = "NO" }
-    Add-EnvironmentInfo $Context @("db_version=$version", "db_major_version=$major", "db_is_cdb=$isCdb")
+    $dbRole = ""
+    $dbOpenMode = ""
+    $dbUniqueName = ""
+    try {
+        $identity = (Invoke-OraScalar $Context "SELECT database_role || '|' || open_mode || '|' || db_unique_name FROM v`$database;").Trim()
+        $identityParts = @($identity -split '\|', 3)
+        if ($identityParts.Count -gt 0) { $dbRole = $identityParts[0].Trim() }
+        if ($identityParts.Count -gt 1) { $dbOpenMode = $identityParts[1].Trim() }
+        if ($identityParts.Count -gt 2) { $dbUniqueName = $identityParts[2].Trim() }
+    } catch {}
+    $hasDgProcess = $false
+    $hasDgDestExt = $false
+    try { $hasDgProcess = ((Invoke-OraScalar $Context "SELECT CASE WHEN COUNT(*)>0 THEN 'YES' ELSE 'NO' END FROM dba_objects WHERE owner='SYS' AND object_name='V_`$DATAGUARD_PROCESS';").Trim() -eq "YES") } catch {}
+    try { $hasDgDestExt = ((Invoke-OraScalar $Context "SELECT CASE WHEN COUNT(DISTINCT column_name)=6 THEN 'YES' ELSE 'NO' END FROM dba_tab_columns WHERE owner='SYS' AND table_name='V_`$ARCHIVE_DEST_STATUS' AND column_name IN ('DB_UNIQUE_NAME','SYNCHRONIZED','SYNCHRONIZATION_STATUS','GAP_STATUS','APPLIED_THREAD#','APPLIED_SEQ#');").Trim() -eq "YES") } catch {}
+    Add-EnvironmentInfo $Context @(
+        "db_version=$version", "db_major_version=$major", "db_is_cdb=$isCdb",
+        "db_role=$dbRole", "db_open_mode=$dbOpenMode", "db_unique_name=$dbUniqueName"
+    )
 
-    $queries = Get-DatabaseQueries ([bool]$Config.CollectSqlText)
+    $queries = Get-DatabaseQueries ([bool]$Config.CollectSqlText) $hasDgDestExt $hasDgProcess
     foreach ($entry in $queries.GetEnumerator()) {
         Invoke-RegisteredSql $Context $dbDir $entry.Key $entry.Value -Optional:($entry.Key -in @("asm_diskgroups.txt","asm_disks.txt"))
     }
@@ -227,9 +278,33 @@ function Collect-WindowsDatabase {
     Collect-OracleWindowsMemory $Context $dbDir
 
     if ($isCdb -eq "YES") {
+        Invoke-RegisteredSql $Context $dbDir "pdb_context_v2.txt" "SELECT TO_CHAR(SYSDATE,'YYYY-MM-DD HH24:MI:SS') collected_at,instance_number FROM v`$instance;
+SELECT 'PDB_CONTEXT_V2_OK' FROM dual;" -Optional
+        Invoke-RegisteredSql $Context $dbDir "pdb_storage_v2.txt" "WITH files AS (SELECT con_id,tablespace_name,file_name FROM cdb_data_files UNION ALL SELECT con_id,tablespace_name,file_name FROM cdb_temp_files) SELECT DISTINCT f.con_id,f.tablespace_name,CASE WHEN f.file_name LIKE '+%' THEN SUBSTR(f.file_name,2,INSTR(f.file_name,'/')-2) ELSE 'FILESYSTEM' END storage_name,g.usable_file_mb FROM files f LEFT JOIN v`$asm_diskgroup g ON f.file_name LIKE '+%' AND UPPER(g.name)=UPPER(SUBSTR(f.file_name,2,INSTR(f.file_name,'/')-2)) ORDER BY f.con_id,f.tablespace_name;
+SELECT 'PDB_STORAGE_V2_OK' FROM dual;" -Optional
+        Invoke-RegisteredSql $Context $dbDir "pdb_tablespaces_v2.txt" "WITH df AS (SELECT con_id,tablespace_name,SUM(bytes) alloc_bytes,SUM(CASE WHEN autoextensible='YES' THEN GREATEST(bytes,maxbytes) ELSE bytes END) max_bytes,MAX(autoextensible) autoextensible FROM cdb_data_files GROUP BY con_id,tablespace_name), fs AS (SELECT con_id,tablespace_name,SUM(bytes) free_bytes FROM cdb_free_space GROUP BY con_id,tablespace_name) SELECT c.con_id,c.name pdb_name,t.tablespace_name,t.contents,t.status,ROUND(df.alloc_bytes/1048576,3) alloc_mb,ROUND((df.alloc_bytes-NVL(fs.free_bytes,0))/1048576,3) used_mb,ROUND(NVL(fs.free_bytes,0)/1048576,3) free_mb,ROUND(df.max_bytes/1048576,3) max_mb,df.autoextensible FROM v`$containers c JOIN cdb_tablespaces t ON t.con_id=c.con_id LEFT JOIN df ON df.con_id=t.con_id AND df.tablespace_name=t.tablespace_name LEFT JOIN fs ON fs.con_id=t.con_id AND fs.tablespace_name=t.tablespace_name WHERE t.contents<>'TEMPORARY' ORDER BY c.con_id,t.tablespace_name;
+SELECT 'PDB_TABLESPACES_V2_OK' FROM dual;" -Optional
+        Invoke-RegisteredSql $Context $dbDir "pdb_temp_v2.txt" "WITH tf AS (SELECT con_id,tablespace_name,SUM(bytes) alloc_bytes,SUM(CASE WHEN autoextensible='YES' THEN GREATEST(bytes,maxbytes) ELSE bytes END) max_bytes FROM cdb_temp_files GROUP BY con_id,tablespace_name), tu AS (SELECT u.con_id,u.tablespace,SUM(u.blocks*t.block_size) used_bytes FROM gv`$tempseg_usage u JOIN cdb_tablespaces t ON t.con_id=u.con_id AND t.tablespace_name=u.tablespace GROUP BY u.con_id,u.tablespace) SELECT c.con_id,c.name pdb_name,t.tablespace_name,t.contents,t.status,ROUND(tf.alloc_bytes/1048576,3) alloc_mb,ROUND(NVL(tu.used_bytes,0)/1048576,3) used_mb,ROUND((tf.alloc_bytes-NVL(tu.used_bytes,0))/1048576,3) free_mb,ROUND(tf.max_bytes/1048576,3) max_mb,'N/A' autoextensible FROM cdb_tablespaces t JOIN v`$containers c ON c.con_id=t.con_id LEFT JOIN tf ON tf.con_id=t.con_id AND tf.tablespace_name=t.tablespace_name LEFT JOIN tu ON tu.con_id=t.con_id AND tu.tablespace=t.tablespace_name WHERE t.contents='TEMPORARY' ORDER BY c.con_id,t.tablespace_name;
+SELECT 'PDB_TEMP_V2_OK' FROM dual;" -Optional
+        Invoke-RegisteredSql $Context $dbDir "pdb_sessions_v2.txt" "SELECT s.inst_id,s.con_id,s.sid,s.serial#,s.username,s.status,s.sql_id,s.event,s.blocking_instance,s.blocking_session,s.seconds_in_wait,CASE WHEN s.taddr IS NOT NULL THEN s.last_call_et END call_seconds FROM gv`$session s WHERE s.type='USER' AND s.con_id>2 ORDER BY s.con_id,s.inst_id,s.sid;
+SELECT 'PDB_SESSIONS_V2_OK' FROM dual;" -Optional
+        Invoke-RegisteredSql $Context $dbDir "pdb_transactions_v2.txt" "SELECT s.inst_id,s.con_id,s.sid,s.serial#,s.username,t.start_time,ROUND((SYSDATE-TO_DATE(t.start_time,'MM/DD/RR HH24:MI:SS'))*86400) age_seconds,t.used_ublk,t.used_urec FROM gv`$transaction t JOIN gv`$session s ON s.inst_id=t.inst_id AND s.taddr=t.addr WHERE s.con_id>2;
+SELECT 'PDB_TRANSACTIONS_V2_OK' FROM dual;" -Optional
+        Invoke-RegisteredSql $Context $dbDir "pdb_temp_users_v2.txt" "SELECT u.inst_id,u.con_id,u.username,u.sql_id,u.tablespace,SUM(u.blocks) blocks FROM gv`$tempseg_usage u GROUP BY u.inst_id,u.con_id,u.username,u.sql_id,u.tablespace ORDER BY SUM(u.blocks) DESC;
+SELECT 'PDB_TEMP_USERS_V2_OK' FROM dual;" -Optional
+        Invoke-RegisteredSql $Context $dbDir "pdb_health_v2.txt" "WITH business AS (SELECT con_id,username,account_status FROM cdb_users WHERE oracle_maintained='N'), metrics AS ( SELECT o.con_id,'INVALID_OBJECTS' metric,COUNT(*) metric_value FROM cdb_objects o JOIN business b ON b.con_id=o.con_id AND b.username=o.owner WHERE o.status='INVALID' GROUP BY o.con_id UNION ALL SELECT i.con_id,'UNUSABLE_INDEXES',COUNT(*) FROM cdb_indexes i JOIN business b ON b.con_id=i.con_id AND b.username=i.owner WHERE i.status='UNUSABLE' GROUP BY i.con_id UNION ALL SELECT i.con_id,'UNUSABLE_INDEX_PARTS',COUNT(*) FROM cdb_ind_partitions i JOIN business b ON b.con_id=i.con_id AND b.username=i.index_owner WHERE i.status='UNUSABLE' GROUP BY i.con_id UNION ALL SELECT i.con_id,'UNUSABLE_INDEX_SUBPARTS',COUNT(*) FROM cdb_ind_subpartitions i JOIN business b ON b.con_id=i.con_id AND b.username=i.index_owner WHERE i.status='UNUSABLE' GROUP BY i.con_id UNION ALL SELECT t.con_id,'STALE_STATS',COUNT(*) FROM cdb_tab_statistics t JOIN business b ON b.con_id=t.con_id AND b.username=t.owner WHERE t.stale_stats='YES' AND t.object_type='TABLE' GROUP BY t.con_id UNION ALL SELECT t.con_id,'MISSING_STATS',COUNT(*) FROM cdb_tab_statistics t JOIN business b ON b.con_id=t.con_id AND b.username=t.owner WHERE t.last_analyzed IS NULL AND t.object_type='TABLE' GROUP BY t.con_id UNION ALL SELECT j.con_id,'FAILED_JOBS_7D',COUNT(*) FROM cdb_scheduler_job_run_details j JOIN business b ON b.con_id=j.con_id AND b.username=j.owner WHERE j.status='FAILED' AND j.actual_start_date>SYSTIMESTAMP-INTERVAL '7' DAY GROUP BY j.con_id UNION ALL SELECT con_id,'LOCKED_EXPIRED_USERS',COUNT(*) FROM business WHERE account_status<>'OPEN' GROUP BY con_id) SELECT c.con_id,c.name pdb_name,k.metric,NVL(m.metric_value,0) metric_value FROM v`$containers c CROSS JOIN (SELECT 'INVALID_OBJECTS' metric FROM dual UNION ALL SELECT 'UNUSABLE_INDEXES' FROM dual UNION ALL SELECT 'UNUSABLE_INDEX_PARTS' FROM dual UNION ALL SELECT 'UNUSABLE_INDEX_SUBPARTS' FROM dual UNION ALL SELECT 'STALE_STATS' FROM dual UNION ALL SELECT 'MISSING_STATS' FROM dual UNION ALL SELECT 'FAILED_JOBS_7D' FROM dual UNION ALL SELECT 'LOCKED_EXPIRED_USERS' FROM dual) k LEFT JOIN metrics m ON m.con_id=c.con_id AND m.metric=k.metric WHERE c.con_id>2 AND c.open_mode IN ('READ ONLY','READ WRITE') AND EXISTS (SELECT 1 FROM cdb_users u WHERE u.con_id=c.con_id) ORDER BY c.con_id,k.metric;
+SELECT 'PDB_HEALTH_V2_OK' FROM dual;" -Optional
+        Invoke-RegisteredSql $Context $dbDir "pdb_open_instances_v2.txt" "SELECT p.inst_id,p.con_id,p.name pdb_name,p.open_mode,p.restricted FROM gv`$pdbs p ORDER BY p.con_id,p.inst_id;
+SELECT 'PDB_OPEN_INSTANCES_V2_OK' FROM dual;" -Optional
+        Invoke-RegisteredSql $Context $dbDir "pdb_services_v2.txt" "SELECT inst_id,con_id,name FROM gv`$active_services WHERE con_id>2 ORDER BY con_id,inst_id,name;
+SELECT 'PDB_SERVICES_V2_OK' FROM dual;" -Optional
+        Invoke-RegisteredSql $Context $dbDir "pdb_undo_v2.txt" "SELECT con_id,tablespace_name,status,ROUND(SUM(bytes)/1048576,3) size_mb FROM cdb_undo_extents GROUP BY con_id,tablespace_name,status ORDER BY con_id,tablespace_name,status;
+SELECT 'PDB_UNDO_V2_OK' FROM dual;" -Optional
+        Invoke-RegisteredSql $Context $dbDir "pdb_undo_errors_v2.txt" "SELECT inst_id,con_id,SUM(ssolderrcnt) snapshot_old,SUM(nospaceerrcnt) no_space FROM gv`$undostat WHERE begin_time>SYSDATE-1 GROUP BY inst_id,con_id;
+SELECT 'PDB_UNDO_ERRORS_V2_OK' FROM dual;" -Optional
         Invoke-RegisteredSql $Context $dbDir "cdb_info.txt" "SELECT CDB FROM v`$database;"
         Invoke-RegisteredSql $Context $dbDir "pdb_info.txt" "SELECT p.pdb_name, p.pdb_id, p.status, v.open_mode, v.restricted, v.open_time, v.total_size/1024/1024/1024 total_size_gb FROM dba_pdbs p JOIN v`$pdbs v ON p.pdb_id=v.con_id ORDER BY p.pdb_id;"
-        Invoke-RegisteredSql $Context $dbDir "pdb_datafiles.txt" "SELECT p.pdb_id, p.pdb_name, d.file_id, d.tablespace_name, d.file_name, ROUND(d.maxbytes/1024/1024,2) max_size_mb, ROUND(d.bytes/1024/1024,2) total_size_mb, ROUND(d.user_bytes/1024/1024,2) used_size_mb, d.autoextensible, d.online_status FROM dba_pdbs p JOIN cdb_data_files d ON p.pdb_id=d.con_id ORDER BY p.pdb_id;"
+        Invoke-RegisteredSql $Context $dbDir "pdb_datafiles.txt" "SELECT p.pdb_id, p.pdb_name, d.file_id, d.tablespace_name, d.file_name, ROUND(d.maxbytes/1024/1024,2) max_size_mb, ROUND(d.bytes/1024/1024,2) total_size_mb, ROUND(d.user_bytes/1024/1024,2) usable_size_mb, d.autoextensible, d.online_status FROM dba_pdbs p JOIN cdb_data_files d ON p.pdb_id=d.con_id ORDER BY p.pdb_id;"
         Invoke-RegisteredSql $Context $dbDir "pdb_users.txt" "SELECT con_id, username, account_status, created, default_tablespace, profile FROM cdb_users WHERE username NOT IN ('SYS','SYSTEM') ORDER BY con_id, username;"
     } else {
         Write-PipeTable (Join-Path $dbDir "cdb_info.txt") @("CDB") @(,@("NO"))
@@ -240,6 +315,19 @@ function Collect-WindowsDatabase {
     }
 
     if ([bool]$Config.CheckAwr) {
+        # Preserve CON_ID for the reporter to select one common snapshot scope.
+        $awrSysstatCon = "0"; $awrEventCon = "0"; $awrSqlCon = "0"
+        if ($major -ge 12) { $awrSysstatCon = "ss.con_id"; $awrEventCon = "e.con_id"; $awrSqlCon = "q.con_id" }
+        Invoke-RegisteredSql $Context $dbDir "awr_context_v2.txt" "SELECT d.dbid,d.database_role,i.instance_number,i.instance_name,i.host_name,TO_CHAR(i.startup_time,'YYYY-MM-DD HH24:MI:SS') startup_time,TO_CHAR(SYSDATE,'YYYY-MM-DD HH24:MI:SS') collected_at FROM v`$database d CROSS JOIN v`$instance i;
+SELECT 'AWR_CONTEXT_V2_OK' FROM dual;" -Optional
+        Invoke-RegisteredSql $Context $dbDir "awr_snapshot_v2.txt" "SELECT * FROM (SELECT s.dbid,s.instance_number,s.snap_id,TO_CHAR(s.startup_time,'YYYY-MM-DD HH24:MI:SS') startup_time,TO_CHAR(s.end_interval_time,'YYYY-MM-DD HH24:MI:SS') end_time,ROW_NUMBER() OVER (PARTITION BY s.dbid,s.instance_number ORDER BY s.snap_id DESC) rn FROM dba_hist_snapshot s WHERE s.dbid=(SELECT dbid FROM v`$database) AND s.instance_number=(SELECT instance_number FROM v`$instance)) WHERE rn<=2;
+SELECT 'AWR_SNAPSHOT_V2_OK' FROM dual;" -Optional
+        Invoke-RegisteredSql $Context $dbDir "awr_sysstat_v2.txt" "WITH snaps AS (SELECT * FROM (SELECT s.dbid,s.instance_number,s.snap_id,TO_CHAR(s.startup_time,'YYYY-MM-DD HH24:MI:SS') startup_time,TO_CHAR(s.end_interval_time,'YYYY-MM-DD HH24:MI:SS') end_time,ROW_NUMBER() OVER (PARTITION BY s.dbid,s.instance_number ORDER BY s.snap_id DESC) rn FROM dba_hist_snapshot s WHERE s.dbid=(SELECT dbid FROM v`$database) AND s.instance_number=(SELECT instance_number FROM v`$instance)) WHERE rn<=2) SELECT ss.dbid,ss.instance_number,ss.snap_id,$awrSysstatCon con_id,ss.stat_name,TO_CHAR(ss.value,'FM99999999999999999999999999999999999990') stat_value FROM dba_hist_sysstat ss JOIN snaps s ON s.dbid=ss.dbid AND s.instance_number=ss.instance_number AND s.snap_id=ss.snap_id WHERE ss.stat_name IN ('CPU used by this session','physical reads cache','consistent gets from cache','db block gets from cache','physical reads','physical reads direct','physical writes','redo size','user commits','user rollbacks','parse count (total)','parse count (hard)','parse time elapsed','execute count') ORDER BY ss.snap_id,ss.stat_name;
+SELECT 'AWR_SYSSTAT_V2_OK' FROM dual;" -Optional
+        Invoke-RegisteredSql $Context $dbDir "awr_sqlstat_v2.txt" "WITH snaps AS (SELECT * FROM (SELECT s.dbid,s.instance_number,s.snap_id,TO_CHAR(s.startup_time,'YYYY-MM-DD HH24:MI:SS') startup_time,TO_CHAR(s.end_interval_time,'YYYY-MM-DD HH24:MI:SS') end_time,ROW_NUMBER() OVER (PARTITION BY s.dbid,s.instance_number ORDER BY s.snap_id DESC) rn FROM dba_hist_snapshot s WHERE s.dbid=(SELECT dbid FROM v`$database) AND s.instance_number=(SELECT instance_number FROM v`$instance)) WHERE rn<=2) SELECT * FROM (SELECT q.dbid,q.instance_number,q.snap_id,q.sql_id,$awrSqlCon con_id,q.plan_hash_value,TO_CHAR(q.executions_delta,'FM99999999999999999999999999999999999990') executions_delta,TO_CHAR(q.parse_calls_delta,'FM99999999999999999999999999999999999990') parse_calls_delta,TO_CHAR(q.loads_delta,'FM99999999999999999999999999999999999990') loads_delta,TO_CHAR(q.invalidations_delta,'FM99999999999999999999999999999999999990') invalidations_delta,TO_CHAR(q.elapsed_time_delta,'FM99999999999999999999999999999999999990') elapsed_time_delta,TO_CHAR(q.cpu_time_delta,'FM99999999999999999999999999999999999990') cpu_time_delta,TO_CHAR(q.buffer_gets_delta,'FM99999999999999999999999999999999999990') buffer_gets_delta,TO_CHAR(q.disk_reads_delta,'FM99999999999999999999999999999999999990') disk_reads_delta,q.version_count,ROW_NUMBER() OVER (ORDER BY q.elapsed_time_delta DESC,q.sql_id,$awrSqlCon,q.plan_hash_value) rn FROM dba_hist_sqlstat q JOIN snaps s ON s.dbid=q.dbid AND s.instance_number=q.instance_number AND s.snap_id=q.snap_id WHERE s.rn=1) WHERE rn<=30;
+SELECT 'AWR_SQLSTAT_V2_OK' FROM dual;" -Optional
+        Invoke-RegisteredSql $Context $dbDir "awr_events_v2.txt" "WITH snaps AS (SELECT * FROM (SELECT s.dbid,s.instance_number,s.snap_id,TO_CHAR(s.startup_time,'YYYY-MM-DD HH24:MI:SS') startup_time,TO_CHAR(s.end_interval_time,'YYYY-MM-DD HH24:MI:SS') end_time,ROW_NUMBER() OVER (PARTITION BY s.dbid,s.instance_number ORDER BY s.snap_id DESC) rn FROM dba_hist_snapshot s WHERE s.dbid=(SELECT dbid FROM v`$database) AND s.instance_number=(SELECT instance_number FROM v`$instance)) WHERE rn<=2) SELECT e.dbid,e.instance_number,e.snap_id,$awrEventCon con_id,e.event_name,e.wait_class,TO_CHAR(e.total_waits,'FM99999999999999999999999999999999999990') total_waits,TO_CHAR(e.time_waited_micro,'FM99999999999999999999999999999999999990') time_waited_micro FROM dba_hist_system_event e JOIN snaps s ON s.dbid=e.dbid AND s.instance_number=e.instance_number AND s.snap_id=e.snap_id WHERE e.wait_class<>'Idle';
+SELECT 'AWR_EVENTS_V2_OK' FROM dual;" -Optional
         $awr = [ordered]@{
             "awr_snapshot.txt"="SELECT * FROM (SELECT snap_id, begin_interval_time, end_interval_time FROM dba_hist_snapshot ORDER BY snap_id DESC) WHERE ROWNUM<=10;"
             "awr_sysstat.txt"="SELECT * FROM (SELECT snap_id, instance_number, stat_name, value FROM dba_hist_sysstat WHERE stat_name IN ('CPU used by this session','db block gets','consistent gets','physical reads','physical writes','redo size','user commits','execute count') ORDER BY snap_id DESC) WHERE ROWNUM<=50;"
